@@ -64,6 +64,9 @@ class LLMProvider(Protocol):
     name: str
 
     async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult: ...
+    async def correct_extraction(  # Fase 1: ✏️ Corregir sobre la extracción pendiente
+        self, extraction: ExtractionResult, correction: str, today: date
+    ) -> ExtractionResult: ...
     async def classify_intent(
         self, text: str, history: list[ChatTurn], today: date, has_pending: bool
     ) -> Intent: ...

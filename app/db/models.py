@@ -50,6 +50,7 @@ class NotificationKind(models.TextChoices):
 class LLMTask(models.TextChoices):
     VISION = "vision", "Visión"
     INTENT = "intent", "Intención"
+    CORRECTION = "correction", "Corrección"
 
 
 class User(models.Model):

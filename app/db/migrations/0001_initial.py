@@ -26,7 +26,11 @@ class Migration(migrations.Migration):
                 (
                     "task",
                     models.TextField(
-                        choices=[("vision", "Visión"), ("intent", "Intención")],
+                        choices=[
+                            ("vision", "Visión"),
+                            ("intent", "Intención"),
+                            ("correction", "Corrección"),
+                        ],
                         verbose_name="tarea",
                     ),
                 ),

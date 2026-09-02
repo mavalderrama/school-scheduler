@@ -8,6 +8,7 @@ confiable; sin `Bash` ni escritura, el peor caso es un JSON malo que pydantic re
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import date
 from pathlib import Path
@@ -23,6 +24,8 @@ from claude_agent_sdk import (
 )
 
 from app.config import Settings
+from app.llm.json_out import validate_with_retry
+from app.llm.prompting import correction_prompt, extraction_prompt
 from app.llm.prompts import load_prompt
 from app.llm.provider import LLMOutputError, LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, OkProbe, ProviderHealth
@@ -74,6 +77,7 @@ class ClaudeSDKProvider:
         self._token = settings.claude_code_oauth_token
         self.model = settings.claude_sdk_model
         self._max_turns = settings.claude_sdk_max_turns
+        self._tz = settings.tz
         self._data_dir = settings.data_dir
         self._config_dir = settings.data_dir / "claude"
         self._api_timeout_ms = max(settings.llm_vision_timeout, settings.llm_text_timeout) * 1000
@@ -154,7 +158,42 @@ class ClaudeSDKProvider:
     # --- Contrato LLMProvider ---------------------------------------------------------
 
     async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
-        raise NotImplementedError("Fase 1")
+        """Visión: solo `Read`, `cwd` fijado a la carpeta de la foto, ruta relativa."""
+        image_path = Path(os.path.abspath(image_path))  # noqa: ASYNC240 (sin IO)
+        prompt = extraction_prompt(
+            today,
+            self._tz,
+            f"La imagen está en el archivo `./{image_path.name}` del directorio de trabajo. "
+            "Léela con la herramienta Read (es la única herramienta permitida) y extrae "
+            "las entradas.",
+        )
+
+        async def call(hint: str | None) -> dict[str, Any]:
+            data, _ = await self._run_json(
+                prompt + (hint or ""),
+                tools=["Read"],
+                schema=ExtractionResult.model_json_schema(),
+                cwd=image_path.parent,
+            )
+            return data
+
+        return await validate_with_retry(ExtractionResult, call, provider=self.name)
+
+    async def correct_extraction(
+        self, extraction: ExtractionResult, correction: str, today: date
+    ) -> ExtractionResult:
+        prompt = correction_prompt(extraction, correction, today, self._tz)
+
+        async def call(hint: str | None) -> dict[str, Any]:
+            data, _ = await self._run_json(
+                prompt + (hint or ""),
+                tools=[],
+                schema=ExtractionResult.model_json_schema(),
+                max_turns=1,
+            )
+            return data
+
+        return await validate_with_retry(ExtractionResult, call, provider=self.name)
 
     async def classify_intent(
         self,

@@ -8,26 +8,29 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
+from typing import Literal, Protocol
 
 from app.config import ProviderName, Settings
-from app.llm.schemas import ChatTurn, ExtractionResult, Intent, ProviderHealth
+from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, ProviderHealth
 from app.log import get_logger
-
-if TYPE_CHECKING:
-    pass
 
 log = get_logger(__name__)
 
 Task = Literal["vision", "text"]
-T = TypeVar("T")
 
 
 class LLMError(Exception):
-    """Error controlado de un proveedor. La cadena de fallback lo intercepta."""
+    """Error controlado de un proveedor. La cadena de fallback lo intercepta.
+
+    `attempts` lo rellena `FallbackProvider` al relanzar, para registrar en `llm_calls`.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        self.attempts: list[LLMAttempt] = []
 
 
 class LLMUnavailableError(LLMError):
@@ -43,11 +46,20 @@ class LLMOutputError(LLMError):
 
 
 class LLMProvider(Protocol):
-    """Contrato que cumplen OllamaProvider, ClaudeSDKProvider y AnthropicAPIProvider."""
+    """Contrato que cumplen OllamaProvider, ClaudeSDKProvider y AnthropicAPIProvider.
+
+    `last_usage` guarda el consumo de la última llamada; `FallbackProvider` lo lee bajo
+    un lock justo después de cada llamada para registrarlo en `llm_calls`.
+    """
 
     name: str
+    last_usage: LLMUsage | None
 
     async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult: ...
+
+    async def correct_extraction(
+        self, extraction: ExtractionResult, correction: str, today: date
+    ) -> ExtractionResult: ...
 
     async def classify_intent(
         self,
@@ -77,11 +89,34 @@ def build_provider(name: ProviderName, settings: Settings) -> LLMProvider:
     raise ValueError(f"proveedor desconocido: {name!r}")
 
 
+@dataclass(frozen=True)
+class LLMAttempt:
+    """Un intento contra un proveedor, para `llm_calls`."""
+
+    provider: str
+    ok: bool
+    error: str | None
+    usage: LLMUsage | None
+    duration_ms: int
+    exception: LLMError | None = None
+
+
+@dataclass
+class LLMRun[R]:
+    """Resultado de la cadena: el valor, quién lo produjo y todos los intentos."""
+
+    value: R
+    provider: str
+    attempts: list[LLMAttempt] = field(default_factory=list)
+
+
 class FallbackProvider:
     """Encadena un proveedor principal con uno de respaldo y aplica timeouts por tarea.
 
     Si el principal lanza `LLMError` (o se agota el timeout) se registra y se intenta
-    el fallback. `NotImplementedError` se propaga: es un stub, no un fallo del servicio.
+    el fallback. Con `accept` se puede pedir fallback también cuando el principal responde
+    pero el resultado es débil (p. ej. visión sin entradas). `NotImplementedError` se
+    propaga: es un stub, no un fallo del servicio.
     """
 
     def __init__(
@@ -97,34 +132,88 @@ class FallbackProvider:
         self.timeout_s = timeout_s
         self.name = primary.name if fallback is None else f"{primary.name}+{fallback.name}"
         self.last_used: str | None = None
+        # Serializa las llamadas de la cadena: `last_usage` del proveedor se lee tras cada
+        # llamada y las llamadas al LLM son lentas y una a la vez por diseño.
+        self._lock = asyncio.Lock()
 
     @property
     def providers(self) -> list[LLMProvider]:
         return [self.primary] if self.fallback is None else [self.primary, self.fallback]
 
-    async def _run(self, call: Callable[[LLMProvider], Awaitable[T]]) -> T:
+    async def _attempt[T](
+        self, provider: LLMProvider, call: Callable[[LLMProvider], Awaitable[T]]
+    ) -> tuple[T | None, LLMAttempt]:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        provider.last_usage = None
         try:
             async with asyncio.timeout(self.timeout_s):
-                result = await call(self.primary)
-            self.last_used = self.primary.name
-            return result
+                value = await call(provider)
         except (LLMError, TimeoutError) as exc:
-            if self.fallback is None:
-                raise
+            duration = int((loop.time() - started) * 1000)
+            error: LLMError = (
+                LLMUnavailableError(f"{provider.name}: timeout tras {self.timeout_s:.0f}s")
+                if isinstance(exc, TimeoutError)
+                else exc
+            )
+            return None, LLMAttempt(
+                provider.name, False, str(error), provider.last_usage, duration, error
+            )
+        duration = int((loop.time() - started) * 1000)
+        return value, LLMAttempt(provider.name, True, None, provider.last_usage, duration)
+
+    async def run[T](
+        self,
+        call: Callable[[LLMProvider], Awaitable[T]],
+        *,
+        accept: Callable[[T], bool] | None = None,
+    ) -> LLMRun[T]:
+        """Ejecuta la cadena y devuelve valor + intentos. Lanza el error del último intento."""
+        async with self._lock:
+            attempts: list[LLMAttempt] = []
+            value, attempt = await self._attempt(self.primary, call)
+            attempts.append(attempt)
+            primary_value = value
+            accepted = attempt.ok and (accept is None or accept(value))  # type: ignore[arg-type]
+            if accepted or self.fallback is None:
+                if not attempt.ok:
+                    raise self._error(attempt, attempts)
+                self.last_used = self.primary.name
+                return LLMRun(value, self.primary.name, attempts)  # type: ignore[arg-type]
+
             log.warning(
                 "llm_primary_failed",
                 task=self.task,
                 provider=self.primary.name,
                 fallback=self.fallback.name,
-                error=str(exc),
+                error=attempt.error or "resultado débil",
             )
-        async with asyncio.timeout(self.timeout_s):
-            result = await call(self.fallback)
-        self.last_used = self.fallback.name
-        return result
+            value, attempt = await self._attempt(self.fallback, call)
+            attempts.append(attempt)
+            if attempt.ok:
+                self.last_used = self.fallback.name
+                return LLMRun(value, self.fallback.name, attempts)  # type: ignore[arg-type]
+            if primary_value is not None:
+                # El principal respondió (débil) y el fallback falló: vale lo del principal.
+                self.last_used = self.primary.name
+                return LLMRun(primary_value, self.primary.name, attempts)
+            raise self._error(attempt, attempts)
+
+    @staticmethod
+    def _error(attempt: LLMAttempt, attempts: list[LLMAttempt]) -> LLMError:
+        error = attempt.exception or LLMUnavailableError(attempt.error or "error desconocido")
+        error.attempts = attempts
+        return error
 
     async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
-        return await self._run(lambda p: p.extract_from_image(image_path, today))
+        run = await self.run(lambda p: p.extract_from_image(image_path, today))
+        return run.value
+
+    async def correct_extraction(
+        self, extraction: ExtractionResult, correction: str, today: date
+    ) -> ExtractionResult:
+        run = await self.run(lambda p: p.correct_extraction(extraction, correction, today))
+        return run.value
 
     async def classify_intent(
         self,
@@ -133,7 +222,8 @@ class FallbackProvider:
         today: date,
         has_pending: bool,
     ) -> Intent:
-        return await self._run(lambda p: p.classify_intent(text, history, today, has_pending))
+        run = await self.run(lambda p: p.classify_intent(text, history, today, has_pending))
+        return run.value
 
     async def healthcheck(self) -> ProviderHealth:
         return await self.primary.healthcheck()

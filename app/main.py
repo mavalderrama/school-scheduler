@@ -19,7 +19,7 @@ from aiogram import Bot, Dispatcher  # noqa: E402
 from aiogram.client.default import DefaultBotProperties  # noqa: E402
 from aiogram.enums import ParseMode  # noqa: E402
 
-from app.bot.handlers import commands  # noqa: E402
+from app.bot.handlers import callbacks, commands, photo, text  # noqa: E402
 from app.bot.middlewares.auth import AuthMiddleware  # noqa: E402
 from app.bot.middlewares.db import DjangoDBMiddleware  # noqa: E402
 from app.config import (  # noqa: E402
@@ -33,6 +33,7 @@ from app.db import repo  # noqa: E402
 from app.llm.provider import build_providers  # noqa: E402
 from app.log import configure_logging, get_logger  # noqa: E402
 from app.scheduler.jobs import build_scheduler, register_jobs  # noqa: E402
+from app.services.confirm import PendingStore  # noqa: E402
 from app.web import admin_url, build_admin_server  # noqa: E402
 
 log = get_logger(__name__)
@@ -61,10 +62,13 @@ async def run(settings: Settings) -> None:
     log.info("llm_providers", vision=providers.vision.name, text=providers.text.name)
 
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(settings=settings, providers=providers)
+    dp = Dispatcher(settings=settings, providers=providers, pending=PendingStore())
     dp.update.outer_middleware(AuthMiddleware(settings.allowed_user_ids, settings.allowed_chat_ids))
     dp.update.outer_middleware(DjangoDBMiddleware())
     dp.include_router(commands.router)
+    dp.include_router(photo.router)
+    dp.include_router(callbacks.router)
+    dp.include_router(text.router)
 
     scheduler = build_scheduler(settings)
     register_jobs(scheduler, settings)
