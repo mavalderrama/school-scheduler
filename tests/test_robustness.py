@@ -50,7 +50,9 @@ async def test_quota_leaves_the_photo_retryable(settings: Settings) -> None:
     assert source.local_path is not None
     assert source.chat_id == CHAT
 
-    now = timezone.now()
+    # Margen por el desfase de reloj entre el host y el contenedor de Postgres (`created_at`
+    # lo pone la DB): sin él, la foto recién creada podría no contar como "anterior a ahora".
+    now = timezone.now() + timedelta(minutes=1)
     pending = await repo.photos_awaiting_extraction(now, give_up_before=now - timedelta(hours=24))
     assert [s.pk for s in pending] == [source.pk]
     assert await repo.count_awaiting_extraction() == 1
@@ -67,7 +69,7 @@ async def test_other_llm_errors_mark_the_photo_failed(settings: Settings) -> Non
 async def test_a_photo_waiting_for_confirmation_is_not_retried(settings: Settings) -> None:
     """Ya extraída y esperando ✅ no es candidata a reintento (tiene raw_llm_output)."""
     await ingest_photo(settings, FakeProvider("claude_sdk", result=STRONG))
-    now = timezone.now()
+    now = timezone.now() + timedelta(minutes=1)  # ver el comentario del reloj más arriba
     assert (
         await repo.photos_awaiting_extraction(now, give_up_before=now - timedelta(hours=24)) == []
     )
@@ -77,15 +79,20 @@ async def test_stale_photos_are_abandoned(settings: Settings) -> None:
     with pytest.raises(ingest.IngestError):
         await ingest_photo(settings, FakeProvider("a", fail=LLMQuotaError("límite")))
 
+    # `created_at` lo pone la DB con `Now()` y aquí el reloj es el del host: el contenedor
+    # de Postgres va unos milisegundos por delante, así que un límite en "ahora mismo"
+    # dejaría fuera la fila recién creada. El margen quita esa dependencia del reloj.
+    future = timezone.now() + timedelta(minutes=1)
+
     # Todavía dentro de la ventana: no se abandona.
     assert await repo.abandon_stale_photos(timezone.now() - timedelta(hours=24)) == []
     # Pasada la ventana: se marca failed y se devuelve para avisar al chat.
-    abandoned = await repo.abandon_stale_photos(timezone.now())
+    abandoned = await repo.abandon_stale_photos(future)
     assert len(abandoned) == 1 and abandoned[0].chat_id == CHAT
     source = await repo.get_source(abandoned[0].pk)
     assert source is not None and source.status == SourceStatus.FAILED
     # Idempotente: ya no queda nada que abandonar.
-    assert await repo.abandon_stale_photos(timezone.now()) == []
+    assert await repo.abandon_stale_photos(future) == []
 
 
 async def test_retry_after_quota_succeeds(settings: Settings) -> None:

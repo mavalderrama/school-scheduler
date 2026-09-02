@@ -90,7 +90,11 @@ async def _log_cache_hit(
 
 
 async def extract_photo(
-    source_id: int, image_path: Path, settings: Settings, providers: LLMProviders
+    source_id: int,
+    image_path: Path,
+    settings: Settings,
+    providers: LLMProviders,
+    note: str | None = None,
 ) -> tuple[ExtractionResult, str]:
     """Extracción con la cadena de visión; registra intentos y actualiza la source.
 
@@ -100,7 +104,13 @@ async def extract_photo(
     """
     today = datetime.now(settings.zoneinfo).date()
     image_sha = await asyncio.to_thread(_hash_file, image_path)
-    key = cache.build_key(task="vision", today=today, tz=settings.tz, inputs=[image_sha])
+    # El pie de foto entra en la clave: la misma imagen con otra indicación es otra lectura.
+    key = cache.build_key(
+        task="vision",
+        today=today,
+        tz=settings.tz,
+        inputs=[image_sha, cache.hash_text(note or "")],
+    )
 
     started = time.monotonic()
     hit = await cache.get(ExtractionResult, key, settings)
@@ -117,7 +127,7 @@ async def extract_photo(
 
     try:
         run = await providers.vision.run(
-            lambda p: p.extract_from_image(image_path, today),
+            lambda p: p.extract_from_image(image_path, today, note),
             accept=lambda result: not is_weak(result),
         )
     except LLMQuotaError as exc:
@@ -164,11 +174,16 @@ async def ingest_photo(
     download: Downloader,
     settings: Settings,
     providers: LLMProviders,
+    note: str | None = None,
 ) -> IngestResult:
     """Flujo completo de una foto. Lanza `IngestError` con un mensaje apto para el usuario."""
     user = await repo.upsert_user(user_id, display_name)
     source = await repo.create_source(
-        SourceKind.PHOTO, telegram_file_id=file_id, submitted_by=user, chat_id=chat_id
+        SourceKind.PHOTO,
+        telegram_file_id=file_id,
+        submitted_by=user,
+        chat_id=chat_id,
+        caption=note,
     )
     image_path = settings.photos_dir / f"{source.pk}.jpg"
     try:
@@ -182,7 +197,7 @@ async def ingest_photo(
     await repo.update_source(source.pk, local_path=str(image_path))
 
     try:
-        extraction, provider = await extract_photo(source.pk, image_path, settings, providers)
+        extraction, provider = await extract_photo(source.pk, image_path, settings, providers, note)
     except LLMQuotaError as exc:
         # Cuota agotada: la source queda `pending` sin `raw_llm_output`, que es justo lo que
         # busca `retry_photos_job`. No se reintenta en bucle aquí (regla del plan).

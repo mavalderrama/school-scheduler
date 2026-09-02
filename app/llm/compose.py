@@ -80,8 +80,11 @@ class SlotLike(Protocol):
     @property
     def skipped_reason(self) -> str | None: ...
 
+    @property
+    def schedule_name(self) -> str | None: ...
 
-def slot_line(slot: SlotLike, *, with_date: bool = False) -> str:
+
+def slot_line(slot: SlotLike, *, with_date: bool = False, with_schedule: bool = False) -> str:
     """Una línea de clase. Sin materia se explica por qué, en vez de callar."""
     prefix = f"{format_date_es(slot.day)}: " if with_date else ""
     if slot.subject is None:
@@ -89,7 +92,19 @@ def slot_line(slot: SlotLike, *, with_date: bool = False) -> str:
         return f"🚫 {prefix}sin clase{reason}"
     week = f" · Semana {html.escape(slot.week_label)}" if slot.week_label else ""
     rotation = f" · rot. {html.escape(slot.rotation)}" if slot.rotation else ""
-    return f"🎨 {prefix}<b>{html.escape(slot.subject)}</b>{week}{rotation}"
+    # El nombre del horario solo cuando hay más de uno: si no, es ruido en cada línea.
+    origin = (
+        f" <i>({html.escape(slot.schedule_name)})</i>"
+        if with_schedule and slot.schedule_name
+        else ""
+    )
+    return f"🎨 {prefix}<b>{html.escape(slot.subject)}</b>{week}{rotation}{origin}"
+
+
+def slot_lines(slots: Sequence[SlotLike], *, with_date: bool = False) -> list[str]:
+    """Una línea por horario vigente. Marca el origen solo si hay más de uno."""
+    many = len({s.schedule_name for s in slots if s.schedule_name}) > 1
+    return [slot_line(s, with_date=with_date, with_schedule=many) for s in slots]
 
 
 def format_schedule_draft(draft: ScheduleDraft) -> str:
@@ -230,9 +245,18 @@ HELP_TEXT = (
 
 
 NO_SCHEDULE_TEXT = (
-    "Todavía no tengo el horario cargado. Mándame una foto de la tabla "
+    "Todavía no tengo ningún horario cargado. Mándame una foto de la tabla "
     "(Semana A / Semana B) y te pregunto lo que falte."
 )
+
+
+def format_schedule_applied_multi(name: str, slots: int, anchor: date, replaced: str | None) -> str:
+    """Confirmación de un horario guardado, diciendo si reemplazó a otro o se añadió."""
+    what = f"reemplazando a «{html.escape(replaced)}»" if replaced else "añadido aparte"
+    return (
+        f"✅ Guardado el horario <b>{html.escape(name)}</b> ({what}): {slots} franjas. "
+        f"El ciclo empezó el {format_date_es(anchor)}."
+    )
 
 
 def format_schedule_table(
@@ -287,13 +311,6 @@ GIVE_UP_TEXT = (
     "No consigo entender lo que falta. Descarto la foto con ❌ y la mandas de nuevo, "
     "o me lo cuentas de otra forma."
 )
-
-
-def format_schedule_applied(name: str, slots: int, anchor: date) -> str:
-    return (
-        f"✅ Guardado el horario <b>{html.escape(name)}</b>: {slots} franjas. "
-        f"El ciclo empezó el {format_date_es(anchor)}."
-    )
 
 
 NO_LLM_TEXT = (

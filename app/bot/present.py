@@ -11,7 +11,8 @@ from __future__ import annotations
 from aiogram import Bot
 from aiogram.types import Message
 
-from app.bot.keyboards import confirmation_keyboard
+from app.bot.keyboards import confirmation_keyboard, schedule_keyboard
+from app.db import repo
 from app.llm import compose
 from app.llm.schemas import ExtractionResult
 from app.log import get_logger
@@ -60,6 +61,17 @@ async def present_extraction(
 
     text = compose.format_extraction(extraction)
     keyboard = confirmation_keyboard(source_id)
+    if extraction.doc_type == "schedule":
+        # Con otros horarios ya vigentes hay que preguntar: añadir aparte o reemplazar
+        # uno concreto. Antes el nuevo pisaba a los anteriores sin avisar.
+        existing = [(t.pk, t.name) for t in await repo.active_schedules()]
+        if existing:
+            names = ", ".join(f"«{n}»" for _, n in existing[:3])
+            text += (
+                f"\n\nYa tengo {len(existing)} horario(s) vigente(s): {names}.\n"
+                "¿Lo añado aparte o reemplaza a uno?"
+            )
+            keyboard = schedule_keyboard(source_id, existing)
     summary = (
         await edit_message.edit_text(text, reply_markup=keyboard)
         if edit_message is not None

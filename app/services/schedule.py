@@ -31,6 +31,7 @@ class SlotResult:
     rotation: str | None = None
     subject: str | None = None
     skipped_reason: str | None = None
+    schedule_name: str | None = None
 
     @property
     def has_class(self) -> bool:
@@ -65,8 +66,9 @@ def slot_for(
     """La franja de un día, o el motivo por el que no hay ninguna."""
     if template is None:
         return SlotResult(day, skipped_reason="no hay horario cargado")
+    name = template.name
     if not covers(day, template):
-        return SlotResult(day, skipped_reason="fuera del periodo del horario")
+        return SlotResult(day, skipped_reason="fuera del periodo del horario", schedule_name=name)
 
     info = schoolcal.day_info(day, exceptions=exceptions, country=country)
     index = week_index(day, template)
@@ -74,7 +76,7 @@ def slot_for(
 
     if not info.is_school_day:
         # `skip_day`: la etiqueta de la semana no se toca, solo se pierde esa rotación.
-        return SlotResult(day, week_label=label, skipped_reason=info.reason)
+        return SlotResult(day, week_label=label, skipped_reason=info.reason, schedule_name=name)
 
     if template.holiday_policy == HolidayPolicy.SHIFT:  # pragma: no cover - no usado aún
         raise NotImplementedError("la política 'shift' todavía no está implementada")
@@ -83,12 +85,15 @@ def slot_for(
         (s for s in slots if s.week_index == index and s.weekday == day.isoweekday()), None
     )
     if match is None:
-        return SlotResult(day, week_label=label, skipped_reason="sin franja para ese día")
+        return SlotResult(
+            day, week_label=label, skipped_reason="sin franja para ese día", schedule_name=name
+        )
     return SlotResult(
         day,
         week_label=match.week_label,
         rotation=match.rotation,
         subject=match.subject,
+        schedule_name=name,
     )
 
 
@@ -177,50 +182,79 @@ class LoadedSchedule:
     exceptions: dict[date, tuple[str, str]]
 
 
+async def load_all(day: date | None = None) -> list[LoadedSchedule]:
+    """Todas las plantillas vigentes con sus franjas. Una sola consulta de franjas."""
+    templates = await repo.active_schedules(day)
+    if not templates:
+        return []
+    slots = await repo.slots_for_schedules([t.pk for t in templates])
+    exceptions = await repo.calendar_exceptions()
+    return [
+        LoadedSchedule(template=t, slots=slots.get(t.pk, []), exceptions=exceptions)
+        for t in templates
+    ]
+
+
 async def load(day: date | None = None) -> LoadedSchedule | None:
-    """Plantilla vigente + franjas + excepciones, o None si no hay horario cargado."""
-    template = await repo.active_schedule(day)
-    if template is None:
-        return None
-    return LoadedSchedule(
-        template=template,
-        slots=await repo.schedule_slots(template.pk),
-        exceptions=await repo.calendar_exceptions(),
-    )
+    """La primera plantilla vigente. Para cuando solo hace falta saber si hay alguna."""
+    loaded = await load_all(day)
+    return loaded[0] if loaded else None
+
+
+async def resolve_day(day: date, *, country: str = "CO") -> list[SlotResult]:
+    """Qué toca ese día, **una entrada por horario vigente**.
+
+    Lista vacía = no hay ningún horario cargado, que no es lo mismo que no haber clase.
+    Si el día entero no es lectivo se devuelve una sola entrada con el motivo: es una
+    propiedad del calendario, no de cada horario, y repetirla por horario sobra.
+    """
+    loaded = await load_all(day)
+    if not loaded:
+        return []
+
+    info = schoolcal.day_info(day, exceptions=loaded[0].exceptions, country=country)
+    if not info.is_school_day:
+        return [SlotResult(day, skipped_reason=info.reason)]
+
+    results = [
+        slot_for(day, item.template, item.slots, exceptions=item.exceptions, country=country)
+        for item in loaded
+    ]
+    return [r for r in results if r.subject is not None]
 
 
 async def resolve(day: date, *, country: str = "CO") -> SlotResult | None:
-    """Qué toca ese día. **None** significa que no hay horario cargado, que no es lo mismo
-    que que no haya clase: quien llama decide si vale la pena decir algo."""
-    loaded = await load(day)
-    if loaded is None:
-        return None
-    return slot_for(
-        day, loaded.template, loaded.slots, exceptions=loaded.exceptions, country=country
-    )
+    """La primera franja del día. Se conserva para quien solo necesita una."""
+    results = await resolve_day(day, country=country)
+    return results[0] if results else None
 
 
-async def resolve_week(monday: date, *, country: str = "CO") -> list[SlotResult]:
-    loaded = await load(monday)
-    if loaded is None:
-        return []
-    return week_plan(
-        monday, loaded.template, loaded.slots, exceptions=loaded.exceptions, country=country
-    )
+async def resolve_week(monday: date, *, country: str = "CO") -> list[list[SlotResult]]:
+    """Los cinco días hábiles; cada uno con lo que dice cada horario vigente."""
+    return [
+        await resolve_day(monday + timedelta(days=offset), country=country) for offset in range(5)
+    ]
 
 
 async def find_subject(
     subject: str, since: date, *, country: str = "CO", count: int = 3
 ) -> list[SlotResult]:
-    loaded = await load(since)
-    if loaded is None:
+    """Próximas veces que toca una materia, mirando en todos los horarios vigentes."""
+    loaded = await load_all(since)
+    if not loaded:
         return []
-    return next_occurrences(
-        subject,
-        since,
-        loaded.template,
-        loaded.slots,
-        exceptions=loaded.exceptions,
-        country=country,
-        count=count,
-    )
+    found: list[SlotResult] = []
+    for item in loaded:
+        found.extend(
+            next_occurrences(
+                subject,
+                since,
+                item.template,
+                item.slots,
+                exceptions=item.exceptions,
+                country=country,
+                count=count,
+            )
+        )
+    found.sort(key=lambda r: (r.day, r.schedule_name or ""))
+    return found[:count]

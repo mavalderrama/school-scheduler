@@ -94,8 +94,12 @@ class OllamaProvider:
         )
         return response.choices[0].message.content or ""
 
-    async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
-        prompt = extraction_prompt(today, self._tz, "La imagen viene adjunta en este mensaje.")
+    async def extract_from_image(
+        self, image_path: Path, today: date, note: str | None = None
+    ) -> ExtractionResult:
+        prompt = extraction_prompt(
+            today, self._tz, "La imagen viene adjunta en este mensaje.", note
+        )
         image_url = await asyncio.to_thread(_image_data_url, image_path)
         schema = ExtractionResult.model_json_schema()
 

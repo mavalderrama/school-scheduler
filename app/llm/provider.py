@@ -55,7 +55,9 @@ class LLMProvider(Protocol):
     name: str
     last_usage: LLMUsage | None
 
-    async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult: ...
+    async def extract_from_image(
+        self, image_path: Path, today: date, note: str | None = None
+    ) -> ExtractionResult: ...
 
     async def correct_extraction(
         self, extraction: ExtractionResult, correction: str, today: date
@@ -209,8 +211,10 @@ class FallbackProvider:
         error.attempts = attempts
         return error
 
-    async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
-        run = await self.run(lambda p: p.extract_from_image(image_path, today))
+    async def extract_from_image(
+        self, image_path: Path, today: date, note: str | None = None
+    ) -> ExtractionResult:
+        run = await self.run(lambda p: p.extract_from_image(image_path, today, note))
         return run.value
 
     async def correct_extraction(

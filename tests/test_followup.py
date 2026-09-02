@@ -13,7 +13,7 @@ import pytest
 from app.config import Settings
 from app.db import repo
 from app.db.models import ScheduleTemplate, SourceKind, SourceStatus
-from app.llm.provider import LLMUnavailableError
+from app.llm.provider import LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ExtractionResult, QAPair, ScheduleDraft, SlotDraft
 from app.services import agenda, ingest, schedule
 from tests.test_ingest import providers
@@ -196,12 +196,36 @@ async def test_applying_a_schedule_without_an_anchor_refuses() -> None:
         await agenda.apply_source(source.pk, extraction(), today=date(2026, 9, 2))
 
 
-async def test_a_second_schedule_supersedes_the_first_without_deleting() -> None:
+async def test_two_schedules_coexist_by_default() -> None:
+    """Bug real: el segundo horario borraba al primero sin preguntar.
+
+    La rotación académica y el programa de la jornada extendida son cosas distintas y el
+    mismo día tiene las dos, así que por defecto se añade, no se reemplaza.
+    """
     first = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
     await agenda.apply_source(first.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
 
     second = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
-    await agenda.apply_source(second.pk, extraction(anchor=ANCHOR), today=date(2026, 10, 5))
+    pac = extraction(anchor=ANCHOR)
+    assert pac.schedule is not None
+    pac.schedule.name = "PAC - jornada extendida"
+    await agenda.apply_source(second.pk, pac, today=date(2026, 10, 5))
+
+    active = await repo.active_schedules(date(2026, 10, 5))
+    assert len(active) == 2
+    assert {t.name for t in active} == {"Horario K4A", "PAC - jornada extendida"}
+
+
+async def test_replacing_is_explicit_and_supersedes_without_deleting() -> None:
+    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    await agenda.apply_source(first.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
+    old = await repo.active_schedule(date(2026, 9, 2))
+    assert old is not None
+
+    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    await agenda.apply_source(
+        second.pk, extraction(anchor=ANCHOR), today=date(2026, 10, 5), replace_ids=[old.pk]
+    )
 
     templates = [t async for t in ScheduleTemplate.objects.all().order_by("id")]
     assert len(templates) == 2  # nada se borra
@@ -209,10 +233,23 @@ async def test_a_second_schedule_supersedes_the_first_without_deleting() -> None
     assert templates[0].superseded_by_id == second.pk
     assert templates[0].valid_to == date(2026, 10, 4)  # se cierra el día antes
     assert templates[1].is_active is True
+    assert [t.pk for t in await repo.active_schedules(date(2026, 10, 5))] == [templates[1].pk]
 
-    # La plantilla vigente hoy es la nueva.
-    current = await repo.active_schedule(date(2026, 10, 5))
-    assert current is not None and current.pk == templates[1].pk
+
+async def test_replacing_the_same_day_never_closes_before_it_opened() -> None:
+    """Regresión: reemplazar el mismo día dejaba `valid_to` anterior a `valid_from`."""
+    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    await agenda.apply_source(first.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
+    old = await repo.active_schedule(date(2026, 9, 2))
+    assert old is not None
+
+    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    await agenda.apply_source(
+        second.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2), replace_ids=[old.pk]
+    )
+
+    superseded = await ScheduleTemplate.objects.aget(pk=old.pk)
+    assert superseded.valid_to == superseded.valid_from  # nunca antes de empezar
 
 
 async def test_duplicate_rows_in_the_photo_do_not_break_the_unique() -> None:
@@ -251,3 +288,132 @@ async def test_the_stored_schedule_answers_what_is_tomorrow() -> None:
 async def test_without_a_schedule_resolve_says_nothing_rather_than_guessing() -> None:
     assert await schedule.resolve(date(2026, 9, 2)) is None
     assert await schedule.find_subject("natación", date(2026, 9, 2)) == []
+
+
+# --- Convivencia de horarios y pie de foto ---------------------------------------------------
+
+
+def pac_draft() -> ExtractionResult:
+    """El PAC real: ciclo de 1 semana, sin viernes, jornada extendida."""
+    return ExtractionResult(
+        entries=[],
+        doubts=[],
+        detected_language="es",
+        doc_type="schedule",
+        schedule=ScheduleDraft(
+            name="PAC - jornada extendida",
+            cycle_weeks=1,
+            anchor_monday=ANCHOR,
+            slots=[
+                SlotDraft(week_label="A", weekday=1, subject="Jornada extendida de fútbol"),
+                SlotDraft(week_label="A", weekday=2, subject="Jornada extendida de natación"),
+                SlotDraft(week_label="A", weekday=3, subject="Jornada extendida de fútbol"),
+                SlotDraft(week_label="A", weekday=4, subject="Jornada extendida de natación"),
+            ],
+        ),
+    )
+
+
+async def test_a_day_shows_every_active_schedule() -> None:
+    """El caso que falló: con la rotación y el PAC cargados, el jueves tiene las dos."""
+    for ext in (extraction(anchor=ANCHOR), pac_draft()):
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
+
+    slots = await schedule.resolve_day(date(2026, 9, 3))  # jueves, Semana A
+    assert {s.subject for s in slots} == {"Música", "Jornada extendida de natación"}
+    assert {s.schedule_name for s in slots} == {"Horario K4A", "PAC - jornada extendida"}
+
+
+async def test_a_one_week_cycle_never_alternates() -> None:
+    """El PAC se repite igual todas las semanas: cycle_weeks=1."""
+    src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    await agenda.apply_source(src.pk, pac_draft(), today=date(2026, 9, 2))
+    for day in (date(2026, 9, 3), date(2026, 9, 10), date(2026, 9, 17)):
+        slots = await schedule.resolve_day(day)
+        assert [s.subject for s in slots] == ["Jornada extendida de natación"]
+
+
+async def test_a_day_the_pac_does_not_cover_only_shows_the_other() -> None:
+    """El PAC no tiene viernes: ese día solo aparece la rotación académica."""
+    for ext in (extraction(anchor=ANCHOR), pac_draft()):
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
+    slots = await schedule.resolve_day(date(2026, 9, 4))  # viernes, Semana A
+    assert [s.subject for s in slots] == ["Deporte 3"]
+
+
+async def test_a_holiday_is_reported_once_not_once_per_schedule() -> None:
+    for ext in (extraction(anchor=ANCHOR), pac_draft()):
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
+    slots = await schedule.resolve_day(date(2026, 10, 12))  # Día de la Raza
+    assert len(slots) == 1
+    assert slots[0].subject is None and slots[0].skipped_reason == "Día de la Raza"
+
+
+async def test_find_subject_looks_in_every_schedule() -> None:
+    for ext in (extraction(anchor=ANCHOR), pac_draft()):
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
+    found = await schedule.find_subject("natación", date(2026, 9, 2), count=3)
+    # El PAC tiene natación los martes y jueves; la rotación, los jueves de Semana B.
+    assert [s.day for s in found] == [date(2026, 9, 3), date(2026, 9, 8), date(2026, 9, 10)]
+
+
+async def test_the_photo_caption_reaches_the_model(settings: Settings) -> None:
+    """Bug real: lo que el usuario escribía junto a la foto se descartaba sin usarlo."""
+    from tests.test_ingest import fake_download
+
+    provider = FakeProvider("claude_sdk", result=pac_draft())
+    await ingest.ingest_photo(
+        file_id="f",
+        user_id=111,
+        display_name="Alejandro",
+        chat_id=-100,
+        download=fake_download,
+        settings=settings,
+        providers=providers(provider),
+        note="Debes marcar este como PAC horario extendido",
+    )
+    assert provider.notes == ["Debes marcar este como PAC horario extendido"]
+
+
+async def test_the_caption_is_part_of_the_cache_key(settings: Settings) -> None:
+    """La misma foto con otra indicación es otra lectura, no un acierto de caché."""
+    from tests.test_ingest import fake_download
+
+    provider = FakeProvider("claude_sdk", result=pac_draft())
+    for note in ("es el horario del PAC", "es el horario del PAC", "en realidad es la agenda"):
+        await ingest.ingest_photo(
+            file_id="f",
+            user_id=111,
+            display_name="Alejandro",
+            chat_id=-100,
+            download=fake_download,
+            settings=settings,
+            providers=providers(provider),
+            note=note,
+        )
+    assert provider.calls == 2  # la segunda repetición sí sale de la caché
+
+
+async def test_the_caption_survives_a_restart(settings: Settings) -> None:
+    """Una foto reintentada tras quedarse sin cuota tiene que releerse con su indicación."""
+    from tests.test_ingest import fake_download
+
+    provider = FakeProvider("claude_sdk", fail=LLMQuotaError("límite"))
+    with pytest.raises(ingest.IngestError) as info:
+        await ingest.ingest_photo(
+            file_id="f",
+            user_id=111,
+            display_name="Alejandro",
+            chat_id=-100,
+            download=fake_download,
+            settings=settings,
+            providers=providers(provider),
+            note="Debes marcar este como PAC horario extendido",
+        )
+    source = await repo.get_source(info.value.source_id)
+    assert source is not None
+    assert source.caption == "Debes marcar este como PAC horario extendido"

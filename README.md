@@ -88,7 +88,12 @@ gunzip -c data/backups/agenda-YYYYmmdd-HHMM.sql.gz | \
 3. Confirmar con ✅. A partir de ahí `/horario`, `/hoy`, `/manana`, `/semana` y la
    notificación de las 19:00 dicen qué clase toca.
 
-Una foto nueva del horario **reemplaza** a la anterior; la vieja se conserva desactivada.
+Pueden convivir **varios horarios** (por ejemplo la rotación académica y el programa de la
+jornada extendida): si ya hay alguno cargado, el bot pregunta si el nuevo se **añade aparte**
+o **reemplaza** a uno concreto. Lo reemplazado se conserva desactivado, no se borra.
+
+Lo que escribas **junto a la foto** se usa como contexto para leerla («este es el horario del
+PAC»), así que conviene decirle qué es cuando no sea obvio.
 
 ### Días sin clase
 

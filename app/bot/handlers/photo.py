@@ -44,6 +44,7 @@ async def start_ingest(
             download=download,
             settings=settings,
             providers=providers,
+            note=photo.caption,
         )
     except ingest.IngestError as exc:
         await status.edit_text(f"⚠️ {exc.user_message}")
@@ -68,6 +69,7 @@ async def on_photo(
         file_id=message.photo[-1].file_id,  # la de mayor resolución
         user_id=message.from_user.id,
         display_name=message.from_user.full_name,
+        caption=(message.caption or "").strip() or None,
     )
     chat_id = message.chat.id
     if pending.get(chat_id) is not None:

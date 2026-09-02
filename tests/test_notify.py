@@ -247,3 +247,50 @@ async def test_the_schedule_can_be_turned_off(settings: Settings) -> None:
     send = FakeSender()
     outcomes = await notify.send_daily(send, off, MON)
     assert [o.kind for o in outcomes] == [NotificationKind.NUDGE_EMPTY]
+
+
+async def seed_pac(anchor: date = date(2026, 8, 31)) -> None:
+    """El PAC: ciclo de 1 semana, natación martes y jueves."""
+    from app.llm.schemas import ScheduleDraft, SlotDraft
+
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100999)
+    await agenda.apply_source(
+        source.pk,
+        ExtractionResult(
+            entries=[],
+            doubts=[],
+            detected_language="es",
+            doc_type="schedule",
+            schedule=ScheduleDraft(
+                name="PAC - jornada extendida",
+                cycle_weeks=1,
+                anchor_monday=anchor,
+                slots=[
+                    SlotDraft(week_label="A", weekday=2, subject="Jornada extendida de natación"),
+                ],
+            ),
+        ),
+        today=anchor,
+    )
+
+
+async def test_the_daily_message_lists_every_active_schedule(settings: Settings) -> None:
+    """El caso que falló en producción: solo salía el último horario guardado."""
+    await seed_schedule()
+    await seed_pac()
+    send = FakeSender()
+    await notify.send_daily(send, settings, MON)  # mañana es martes 8
+
+    text = send.sent[0][1]
+    assert "Motricidad" in text
+    assert "Jornada extendida de natación" in text
+    # Con más de un horario, cada línea dice de cuál viene.
+    assert "Horario K4A" in text and "PAC - jornada extendida" in text
+
+
+async def test_with_one_schedule_the_name_is_not_repeated(settings: Settings) -> None:
+    """Con un solo horario el nombre en cada línea es ruido."""
+    await seed_schedule()
+    send = FakeSender()
+    await notify.send_daily(send, settings, MON)
+    assert "Horario K4A" not in send.sent[0][1]

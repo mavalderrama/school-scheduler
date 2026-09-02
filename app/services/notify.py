@@ -16,7 +16,7 @@ from datetime import date, timedelta
 from app.config import Settings
 from app.db import repo
 from app.db.models import AgendaEntry, NotificationKind
-from app.llm.compose import KIND_LABELS, format_date_es, slot_line
+from app.llm.compose import KIND_LABELS, format_date_es, slot_lines
 from app.llm.prompting import weekday_es
 from app.log import get_logger
 from app.services import schedule as schedule_service
@@ -61,12 +61,11 @@ def next_week_days(today: date) -> list[date]:
 
 
 def format_daily(
-    target: date, entries: Sequence[AgendaEntry], slot: SlotResult | None = None
+    target: date, entries: Sequence[AgendaEntry], slots: Sequence[SlotResult] = ()
 ) -> str:
-    """Formato de 7.3, con la clase del horario primero si la hay."""
+    """Formato de 7.3, con las clases del horario primero (una línea por horario)."""
     lines = [f"📚 Mañana, {format_date_es(target)}"]
-    if slot is not None:
-        lines.append(slot_line(slot))
+    lines.extend(slot_lines(slots))
     for kind in KIND_ORDER:
         texts = [html.escape(e.text) for e in entries if e.kind == kind]
         if texts:
@@ -90,9 +89,9 @@ async def build_daily_message(
     """Lo de mañana. El horario cuenta como contenido: si hay clase (o si mañana es festivo)
     hay algo que decir, y el aviso de agenda vacía deja de ser la única opción."""
     entries = await repo.active_entries(target, target)
-    slot = await schedule_service.resolve(target, country=country) if use_schedule else None
-    if entries or slot is not None:
-        return NotificationKind.DAILY, format_daily(target, entries, slot)
+    slots = await schedule_service.resolve_day(target, country=country) if use_schedule else []
+    if entries or slots:
+        return NotificationKind.DAILY, format_daily(target, entries, slots)
     return NotificationKind.NUDGE_EMPTY, format_nudge(target)
 
 

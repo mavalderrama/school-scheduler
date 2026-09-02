@@ -113,8 +113,12 @@ class AnthropicAPIProvider:
             f"anthropic_api: sin tool_use en la respuesta ({response.stop_reason})"
         )
 
-    async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
-        prompt = extraction_prompt(today, self._tz, "La imagen viene adjunta en este mensaje.")
+    async def extract_from_image(
+        self, image_path: Path, today: date, note: str | None = None
+    ) -> ExtractionResult:
+        prompt = extraction_prompt(
+            today, self._tz, "La imagen viene adjunta en este mensaje.", note
+        )
         media_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
         data = await asyncio.to_thread(_read_base64, image_path)
         schema = ExtractionResult.model_json_schema()

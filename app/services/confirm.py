@@ -22,11 +22,16 @@ from app.llm.schemas import ExtractionResult, QAPair
 
 @dataclass(frozen=True)
 class QueuedPhoto:
-    """Foto que llegó mientras había una confirmación pendiente."""
+    """Foto que llegó mientras había una confirmación pendiente.
+
+    `caption` es lo que el usuario escribió junto a la foto en Telegram: contexto para
+    leerla («márcalo como PAC horario extendido»), no una orden para el modelo.
+    """
 
     file_id: str
     user_id: int
     display_name: str
+    caption: str | None = None
 
 
 @dataclass

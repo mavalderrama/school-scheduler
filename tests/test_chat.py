@@ -294,7 +294,7 @@ async def test_query_subject_without_a_schedule_says_so() -> None:
         store=PendingStore(),
         chat_id=1,
     )
-    assert "no tengo el horario" in reply.text.lower()
+    assert "no tengo ningún horario" in reply.text.lower()
 
 
 async def test_query_subject_for_something_not_in_the_schedule() -> None:

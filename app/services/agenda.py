@@ -7,6 +7,7 @@ anterior (`schedule`). Las dos versionan en vez de borrar.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -30,11 +31,20 @@ class ApplyResult:
 
 
 async def apply_source(
-    source_id: int, extraction: ExtractionResult, *, today: date | None = None
+    source_id: int,
+    extraction: ExtractionResult,
+    *,
+    today: date | None = None,
+    replace_ids: Sequence[int] = (),
 ) -> ApplyResult:
-    """Confirma la extracción. Un horario no se mezcla por fecha: reemplaza al anterior."""
+    """Confirma la extracción.
+
+    Un horario no se mezcla por fecha, pero tampoco reemplaza a los demás por su cuenta:
+    solo desactiva los que se le indiquen en `replace_ids`, que decide el usuario con
+    los botones.
+    """
     if extraction.doc_type == "schedule" and extraction.schedule is not None:
-        return await _apply_schedule(source_id, extraction, today or date.today())
+        return await _apply_schedule(source_id, extraction, today or date.today(), replace_ids)
     inserted, superseded = await repo.apply_source_entries(source_id, extraction.entries)
     dates = sorted({entry.entry_date for entry in extraction.entries})
     log.info(
@@ -47,7 +57,12 @@ async def apply_source(
     return ApplyResult(source_id=source_id, dates=dates, inserted=inserted, superseded=superseded)
 
 
-async def _apply_schedule(source_id: int, extraction: ExtractionResult, today: date) -> ApplyResult:
+async def _apply_schedule(
+    source_id: int,
+    extraction: ExtractionResult,
+    today: date,
+    replace_ids: Sequence[int] = (),
+) -> ApplyResult:
     """Guarda el horario. `valid_from` es hoy o el ancla, lo que sea más tarde.
 
     Se usa el ancla cuando es futura (un horario que aún no empieza) y hoy cuando el ciclo
@@ -58,7 +73,9 @@ async def _apply_schedule(source_id: int, extraction: ExtractionResult, today: d
         # No debería llegar aquí: el interrogatorio no deja confirmar sin ancla.
         raise ValueError("el horario no tiene lunes ancla")
     valid_from = max(today, draft.anchor_monday)
-    schedule_id = await repo.apply_schedule(source_id, draft, valid_from=valid_from)
+    schedule_id = await repo.apply_schedule(
+        source_id, draft, valid_from=valid_from, replace_ids=replace_ids
+    )
     slots = len({(s.week_label, s.weekday) for s in draft.slots})
     log.info(
         "schedule_applied",
@@ -66,6 +83,7 @@ async def _apply_schedule(source_id: int, extraction: ExtractionResult, today: d
         schedule_id=schedule_id,
         slots=slots,
         anchor=draft.anchor_monday.isoformat(),
+        replaced=list(replace_ids),
     )
     return ApplyResult(
         source_id=source_id,

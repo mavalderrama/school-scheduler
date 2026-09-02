@@ -7,6 +7,7 @@ aquí y tanto `handlers/callbacks.py` como `handlers/text.py` la llaman.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -40,13 +41,23 @@ async def continue_queue(
         await start_ingest(bot, chat_id, next_photo, settings, providers, pending)
 
 
-async def confirm_photo(current: PendingPhoto, settings: Settings) -> str:
+async def confirm_photo(
+    current: PendingPhoto, settings: Settings, *, replace_ids: Sequence[int] = ()
+) -> str:
     today = datetime.now(settings.zoneinfo).date()
-    result = await agenda.apply_source(current.source_id, current.extraction, today=today)
+    # El nombre del reemplazado hay que leerlo antes: después queda desactivado.
+    replaced = None
+    if replace_ids:
+        old = next((t for t in await repo.active_schedules() if t.pk in set(replace_ids)), None)
+        replaced = old.name if old is not None else None
+
+    result = await agenda.apply_source(
+        current.source_id, current.extraction, today=today, replace_ids=replace_ids
+    )
     draft = current.extraction.schedule
     if result.schedule_id is not None and draft is not None and draft.anchor_monday is not None:
-        return compose.format_schedule_applied(
-            draft.name or "Horario", result.slots, draft.anchor_monday
+        return compose.format_schedule_applied_multi(
+            draft.name or "Horario", result.slots, draft.anchor_monday, replaced
         )
     return compose.format_applied(result.dates, result.inserted, result.superseded)
 
@@ -100,7 +111,9 @@ async def resume_photo(
         return False
 
     try:
-        extraction, _ = await ingest.extract_photo(source.pk, image_path, settings, providers)
+        extraction, _ = await ingest.extract_photo(
+            source.pk, image_path, settings, providers, source.caption
+        )
     except LLMQuotaError:
         return False  # sigue sin cuota; se reintenta en la próxima pasada
     except LLMError as exc:

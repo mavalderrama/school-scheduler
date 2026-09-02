@@ -19,11 +19,11 @@ from app.services.confirm import PendingEdit, PendingPhoto, PendingQuestions, Pe
 router = Router(name="commands")
 
 
-async def _slot(day: date, settings: Settings) -> schedule_service.SlotResult | None:
-    """La clase del día, o None si el horario está apagado o no hay ninguno cargado."""
+async def _slots(day: date, settings: Settings) -> list[schedule_service.SlotResult]:
+    """Las clases del día, una por horario vigente. Vacío si no hay horarios o está apagado."""
     if not settings.schedule_enabled:
-        return None
-    return await schedule_service.resolve(day, country=settings.school_country)
+        return []
+    return await schedule_service.resolve_day(day, country=settings.school_country)
 
 
 @router.message(CommandStart())
@@ -45,10 +45,8 @@ async def cmd_ping(message: Message) -> None:
 async def cmd_hoy(message: Message, settings: Settings) -> None:
     today = datetime.now(settings.zoneinfo).date()
     entries = await repo.active_entries(today, today)
-    slot = await _slot(today, settings)
     lines = [f"📚 Hoy, {compose.format_date_es(today)}:"]
-    if slot is not None:
-        lines.append(compose.slot_line(slot))
+    lines.extend(compose.slot_lines(await _slots(today, settings)))
     lines.extend(compose.stored_line(e) for e in entries)
     if len(lines) == 1:
         lines.append("No tengo nada apuntado.")
@@ -88,13 +86,14 @@ async def cmd_semana(message: Message, settings: Settings) -> None:
         return
     monday = date_from - timedelta(days=date_from.weekday())
     plan = await schedule_service.resolve_week(monday, country=settings.school_country)
-    if not plan:
+    if not any(plan):
         await message.answer(agenda_text)
         return
-    label = next((s.week_label for s in plan if s.week_label), None)
-    header = f"🗓️ <b>Semana {label}</b>" if label else "🗓️ <b>Esta semana</b>"
+    labels = [s.week_label for day in plan for s in day if s.week_label]
+    header = f"🗓️ <b>Semana {labels[0]}</b>" if labels else "🗓️ <b>Esta semana</b>"
     lines = [header]
-    lines.extend(compose.slot_line(s, with_date=True) for s in plan)
+    for day_slots in plan:
+        lines.extend(compose.slot_lines(day_slots, with_date=True))
     await message.answer("\n".join(lines) + "\n\n" + agenda_text)
 
 
@@ -102,15 +101,18 @@ async def cmd_semana(message: Message, settings: Settings) -> None:
 async def cmd_horario(message: Message, settings: Settings) -> None:
     """La tabla completa del horario rotativo y en qué semana estamos. Sin LLM."""
     today = datetime.now(settings.zoneinfo).date()
-    loaded = await schedule_service.load(today)
-    if loaded is None:
+    loaded = await schedule_service.load_all(today)
+    if not loaded:
         await message.answer(compose.NO_SCHEDULE_TEXT)
         return
-    index = schedule_service.week_index(today, loaded.template)
-    current = next((s.week_label for s in loaded.slots if s.week_index == index), None)
-    await message.answer(
-        compose.format_schedule_table(loaded.template.name, loaded.slots, current_label=current)
-    )
+    blocks = []
+    for item in loaded:
+        index = schedule_service.week_index(today, item.template)
+        current = next((s.week_label for s in item.slots if s.week_index == index), None)
+        blocks.append(
+            compose.format_schedule_table(item.template.name, item.slots, current_label=current)
+        )
+    await message.answer("\n\n".join(blocks))
 
 
 @router.message(Command("pendiente"))

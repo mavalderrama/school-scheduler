@@ -363,7 +363,8 @@ CREATE TABLE calendar_exceptions (  -- lo que la librería de festivos no puede 
 - La semana del ciclo es `((lunes(d) − anchor_monday).days // 7) % cycle_weeks`. No depende del número de semana ISO, así que cruza el fin de año sin saltos.
 - Los festivos nacionales **no se guardan**: los calcula la librería `holidays` en ejecución (conoce la Ley Emiliani, que corre festivos al lunes). `calendar_exceptions` es solo para lo del colegio, y `class_day` anula un festivo nacional en el que sí hay clase.
 - Política `skip_day` (la de este colegio): un día no lectivo **no desplaza la rotación**. La semana sigue siendo la que le toca por calendario y esa rotación se pierde esa vuelta.
-- Una foto nueva del horario desactiva la plantilla anterior (`is_active=false`, `superseded_by`, `valid_to` cerrado el día antes de la nueva). Nada se borra.
+- **Varios horarios pueden estar vigentes a la vez** (la rotación académica y el programa de jornada extendida). Una foto nueva **no** desactiva a las demás: solo reemplaza las que el usuario elija con los botones. Lo reemplazado queda `is_active=false` con `superseded_by` y `valid_to` cerrado el día antes, nunca antes de su propio `valid_from` (`schedules_valid_range_check`). Nada se borra.
+- El pie de foto de Telegram viaja al prompt de visión como contexto sobre la imagen y se guarda en `sources.caption`; entra en la clave de caché.
 
 **Semántica de merge (implementar en `services/agenda.py`):**
 - Al confirmar una `source` con entradas para las fechas `{D1, D2, ...}`: para cada fecha, marcar `is_active=false, superseded_by=<nueva source>` en las entradas activas previas de esa fecha, e insertar las nuevas. Todo en una transacción.

@@ -14,13 +14,23 @@ def weekday_es(day: date) -> str:
     return WEEKDAYS_ES[day.weekday()]
 
 
-def extraction_prompt(today: date, tz: str, image_instruction: str) -> str:
-    """Prompt de visión. `image_instruction` dice cómo recibe la imagen ese proveedor."""
+NO_NOTE = "(sin nota)"
+
+
+def extraction_prompt(
+    today: date, tz: str, image_instruction: str, user_note: str | None = None
+) -> str:
+    """Prompt de visión. `image_instruction` dice cómo recibe la imagen ese proveedor.
+
+    `user_note` es el pie de foto que escribió el usuario en Telegram: contexto sobre la
+    imagen ("márcalo como PAC horario extendido"), nunca instrucciones para el modelo.
+    """
     return load_prompt("extract_agenda").format(
         today=today.isoformat(),
         weekday=weekday_es(today),
         tz=tz,
         image_instruction=image_instruction,
+        user_note=(user_note or "").strip() or NO_NOTE,
     )
 
 

@@ -138,10 +138,8 @@ async def query_range(intent: Intent, today: date, *, country: str = "CO") -> Ch
     if date_from == date_to:
         title = f"📚 <b>{compose.format_date_es(date_from)}</b>:"
         # Un solo día lleva también la clase del horario, que es lo que más se pregunta.
-        slot = await schedule_service.resolve(date_from, country=country)
-        lines = [title]
-        if slot is not None:
-            lines.append(compose.slot_line(slot))
+        slots = await schedule_service.resolve_day(date_from, country=country)
+        lines = [title, *compose.slot_lines(slots)]
         lines.extend(compose.stored_line(e) for e in entries)
         if len(lines) == 1:
             return ChatReply(text=f"No tengo nada para el {compose.format_date_es(date_from)}.")
@@ -223,7 +221,7 @@ async def query_subject(intent: Intent, today: date, *, country: str = "CO") -> 
     if not subject:
         return ChatReply(text="¿De qué materia? Por ejemplo: «¿cuándo hay natación?».")
     found = await schedule_service.find_subject(subject, today, country=country, count=3)
-    if not found and await repo.active_schedule(today) is None:
+    if not found and not await repo.active_schedules(today):
         return ChatReply(text=compose.NO_SCHEDULE_TEXT)
     return ChatReply(text=compose.format_next_occurrences(subject, found))
 

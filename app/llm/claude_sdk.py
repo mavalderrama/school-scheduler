@@ -170,7 +170,9 @@ class ClaudeSDKProvider:
 
     # --- Contrato LLMProvider ---------------------------------------------------------
 
-    async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
+    async def extract_from_image(
+        self, image_path: Path, today: date, note: str | None = None
+    ) -> ExtractionResult:
         """Visión: solo `Read`, `cwd` fijado a la carpeta de la foto, ruta relativa."""
         image_path = Path(os.path.abspath(image_path))  # noqa: ASYNC240 (sin IO)
         prompt = extraction_prompt(
@@ -179,6 +181,7 @@ class ClaudeSDKProvider:
             f"La imagen está en el archivo `./{image_path.name}` del directorio de trabajo. "
             "Léela con la herramienta Read (es la única herramienta permitida) y extrae "
             "las entradas.",
+            note,
         )
 
         async def call(hint: str | None) -> dict[str, Any]:

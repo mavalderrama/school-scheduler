@@ -59,6 +59,7 @@ class FakeProvider:
         self.calls = 0
         self.last_usage: LLMUsage | None = None
         self.corrections: list[str] = []
+        self.notes: list[str | None] = []
         self.refinements: list[list[QAPair]] = []
         # Si se fija, `refine_extraction` la devuelve en vez de `result`.
         self.refined: ExtractionResult | None = None
@@ -71,8 +72,11 @@ class FakeProvider:
         if self.fail:
             raise self.fail
 
-    async def extract_from_image(self, image_path: Path, today: date) -> ExtractionResult:
+    async def extract_from_image(
+        self, image_path: Path, today: date, note: str | None = None
+    ) -> ExtractionResult:
         await self._maybe_fail()
+        self.notes.append(note)
         return self.result
 
     async def correct_extraction(

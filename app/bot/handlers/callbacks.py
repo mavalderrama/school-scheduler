@@ -6,7 +6,12 @@ from aiogram import Bot, Router
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import actions
-from app.bot.keyboards import CandidateCallback, EditCallback, SourceCallback
+from app.bot.keyboards import (
+    CandidateCallback,
+    EditCallback,
+    ScheduleCallback,
+    SourceCallback,
+)
 from app.config import Settings
 from app.llm import compose
 from app.llm.provider import LLMProviders
@@ -61,6 +66,36 @@ async def on_source_action(
         "✏️ Dime qué corrijo en un mensaje (por ejemplo: «el disfraz es el jueves, no el "
         "martes» o «quita la tarea de matemáticas»).",
     )
+
+
+@router.callback_query(ScheduleCallback.filter())
+async def on_schedule_action(
+    query: CallbackQuery,
+    callback_data: ScheduleCallback,
+    bot: Bot,
+    settings: Settings,
+    providers: LLMProviders,
+    pending: PendingStore,
+) -> None:
+    """Horario nuevo con otros vigentes: añadirlo aparte o reemplazar uno concreto."""
+    message = query.message
+    if not isinstance(message, Message):
+        await query.answer("Este mensaje ya no está disponible.")
+        return
+    chat_id = message.chat.id
+    current = pending.get(chat_id)
+    if not isinstance(current, PendingPhoto) or current.source_id != callback_data.source_id:
+        await query.answer("Esta lectura ya no está activa.")
+        await message.edit_reply_markup(reply_markup=None)
+        return
+
+    replace_ids = [callback_data.target] if callback_data.action == "replace" else []
+    summary = await actions.confirm_photo(current, settings, replace_ids=replace_ids)
+    await query.answer("Guardado")
+    await message.edit_text(
+        compose.format_extraction(current.extraction).rsplit("\n", 1)[0] + "\n\n" + summary
+    )
+    await actions.continue_queue(bot, chat_id, settings, providers, pending)
 
 
 @router.callback_query(EditCallback.filter())

@@ -7,7 +7,7 @@ PROTECT porque nada se borra; los enums son TEXT + CHECK, no tipos ENUM de Postg
 from __future__ import annotations
 
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.db.models.functions import Now
 
 
@@ -118,6 +118,12 @@ class Source(models.Model):
         db_index=True,
         verbose_name="chat de origen",
         help_text="Chat de Telegram donde llegó, para reintentar y responder tras un reinicio.",
+    )
+    caption = models.TextField(
+        null=True,
+        blank=True,
+        verbose_name="pie de foto",
+        help_text="Lo que escribió el usuario junto a la foto; contexto para releerla.",
     )
     llm_cache_key = models.TextField(
         null=True,
@@ -349,6 +355,12 @@ class ScheduleTemplate(models.Model):
                 name="schedules_holiday_policy_check",
             ),
             models.CheckConstraint(condition=Q(cycle_weeks__gte=1), name="schedules_cycle_check"),
+            # Un horario cerrado antes de empezar es una fila incoherente: pasó de verdad
+            # al reemplazar el mismo día en que se había creado el anterior.
+            models.CheckConstraint(
+                condition=Q(valid_to__isnull=True) | Q(valid_to__gte=F("valid_from")),
+                name="schedules_valid_range_check",
+            ),
         ]
         indexes = [
             models.Index(

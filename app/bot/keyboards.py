@@ -25,6 +25,14 @@ class EditCallback(CallbackData, prefix="edit"):
     edit_id: int
 
 
+class ScheduleCallback(CallbackData, prefix="sch"):
+    """Qué hacer con un horario nuevo cuando ya hay otros vigentes."""
+
+    action: Literal["add", "replace"]
+    source_id: int
+    target: int  # id del horario a reemplazar; 0 en `add`
+
+
 class CandidateCallback(CallbackData, prefix="pick"):
     """Elección entre varias entradas candidatas a borrar."""
 
@@ -87,6 +95,46 @@ def candidates_keyboard(candidates: list[tuple[int, str]], edit_id: int) -> Inli
                 text="❌ Ninguna",
                 callback_data=EditCallback(action="reject", edit_id=edit_id).pack(),
             )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def schedule_keyboard(source_id: int, existing: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    """Horario nuevo con otros ya vigentes: añadir aparte o reemplazar uno concreto.
+
+    Sin esto el horario nuevo pisaba a los anteriores en silencio, que es justo lo que no
+    debe pasar: la rotación académica y la jornada extendida conviven.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="➕ Añadir aparte",
+                callback_data=ScheduleCallback(action="add", source_id=source_id, target=0).pack(),
+            )
+        ]
+    ]
+    rows.extend(
+        [
+            InlineKeyboardButton(
+                text=f"🔁 Reemplazar «{name[:30]}»",
+                callback_data=ScheduleCallback(
+                    action="replace", source_id=source_id, target=schedule_id
+                ).pack(),
+            )
+        ]
+        for schedule_id, name in existing[:3]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✏️ Corregir",
+                callback_data=SourceCallback(action="correct", source_id=source_id).pack(),
+            ),
+            InlineKeyboardButton(
+                text="❌ Descartar",
+                callback_data=SourceCallback(action="reject", source_id=source_id).pack(),
+            ),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)

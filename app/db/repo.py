@@ -107,12 +107,14 @@ async def create_source(
     telegram_file_id: str | None = None,
     submitted_by: User | None = None,
     chat_id: int | None = None,
+    caption: str | None = None,
 ) -> Source:
     return await Source.objects.acreate(
         kind=kind,
         telegram_file_id=telegram_file_id,
         submitted_by=submitted_by,
         chat_id=chat_id,
+        caption=caption,
     )
 
 
@@ -518,19 +520,34 @@ async def table_constraints(table: str) -> dict[str, Any]:
 # --- Horario rotativo y calendario ------------------------------------------------------
 
 
-def _apply_schedule(source_id: int, draft: ScheduleDraft, *, valid_from: date) -> int:
-    """Guarda un horario nuevo y desactiva el anterior. Todo en una transacción.
+def _apply_schedule(
+    source_id: int,
+    draft: ScheduleDraft,
+    *,
+    valid_from: date,
+    replace_ids: Sequence[int] = (),
+) -> int:
+    """Guarda un horario nuevo. **Solo** reemplaza los que se le indiquen explícitamente.
 
-    Igual que con las entradas por fecha, no se edita ni se borra nada: la plantilla
-    anterior queda `is_active=False` con `superseded_by` apuntando a esta source.
+    Varios horarios pueden convivir: la rotación académica y el programa de la jornada
+    extendida son cosas distintas y el mismo día tiene las dos. Reemplazar de más fue un
+    bug real: guardar el segundo horario borraba el primero sin preguntar.
+
+    Lo reemplazado no se borra: queda `is_active=False` con `superseded_by` a esta source
+    y `valid_to` cerrado el día antes (nunca antes de su propio `valid_from`).
     """
     if draft.anchor_monday is None:
         raise ValueError("el horario no tiene lunes ancla")
     with transaction.atomic():
         source = Source.objects.select_for_update().get(pk=source_id)
-        ScheduleTemplate.objects.filter(is_active=True).exclude(source_id=source_id).update(
-            is_active=False, superseded_by=source, valid_to=valid_from - timedelta(days=1)
-        )
+        if replace_ids:
+            for old in ScheduleTemplate.objects.select_for_update().filter(
+                pk__in=replace_ids, is_active=True
+            ):
+                old.is_active = False
+                old.superseded_by = source
+                old.valid_to = max(valid_from - timedelta(days=1), old.valid_from)
+                old.save(update_fields=["is_active", "superseded_by", "valid_to"])
         labels = _week_labels(draft)
         template = ScheduleTemplate.objects.create(
             name=draft.name or "Horario",
@@ -557,8 +574,16 @@ def _apply_schedule(source_id: int, draft: ScheduleDraft, *, valid_from: date) -
         return template.pk
 
 
-async def apply_schedule(source_id: int, draft: ScheduleDraft, *, valid_from: date) -> int:
-    return await sync_to_async(_apply_schedule)(source_id, draft, valid_from=valid_from)
+async def apply_schedule(
+    source_id: int,
+    draft: ScheduleDraft,
+    *,
+    valid_from: date,
+    replace_ids: Sequence[int] = (),
+) -> int:
+    return await sync_to_async(_apply_schedule)(
+        source_id, draft, valid_from=valid_from, replace_ids=replace_ids
+    )
 
 
 def _week_labels(draft: ScheduleDraft) -> dict[str, int]:
@@ -578,12 +603,29 @@ def _unique_slots(draft: ScheduleDraft) -> list[SlotDraft]:
     return list(seen.values())
 
 
-async def active_schedule(day: date | None = None) -> ScheduleTemplate | None:
-    """Plantilla vigente (la que cubre `day`, o la más reciente si no se pasa día)."""
+async def active_schedules(day: date | None = None) -> list[ScheduleTemplate]:
+    """Todas las plantillas vigentes ese día. Pueden convivir varias."""
     qs = ScheduleTemplate.objects.filter(is_active=True)
     if day is not None:
         qs = qs.filter(valid_from__lte=day).filter(Q(valid_to__isnull=True) | Q(valid_to__gte=day))
-    return await qs.order_by("-valid_from", "-id").afirst()
+    return [t async for t in qs.order_by("id")]
+
+
+async def active_schedule(day: date | None = None) -> ScheduleTemplate | None:
+    """La primera plantilla vigente. Usar `active_schedules` salvo que baste con saber si hay."""
+    schedules = await active_schedules(day)
+    return schedules[0] if schedules else None
+
+
+async def slots_for_schedules(schedule_ids: Sequence[int]) -> dict[int, list[ScheduleSlot]]:
+    """Franjas de varios horarios en una sola consulta, agrupadas por horario."""
+    grouped: dict[int, list[ScheduleSlot]] = {sid: [] for sid in schedule_ids}
+    qs = ScheduleSlot.objects.filter(schedule_id__in=schedule_ids).order_by(
+        "schedule_id", "week_index", "weekday", "id"
+    )
+    async for slot in qs:
+        grouped[slot.schedule_id].append(slot)
+    return grouped
 
 
 async def schedule_slots(schedule_id: int) -> list[ScheduleSlot]:
