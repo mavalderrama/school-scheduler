@@ -12,7 +12,7 @@ from app.db import repo
 from app.db.models import SourceStatus
 from app.llm.provider import FallbackProvider, LLMProviders, LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ExtractedEntry, ExtractionResult
-from app.services import ingest
+from app.services import agenda, ingest
 from tests.test_provider import FakeProvider
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -154,3 +154,91 @@ async def test_upsert_user_keeps_role() -> None:
     await user.asave(update_fields=["role"])
     again = await repo.upsert_user(111, "Mamá ✨")
     assert again.role == "admin" and again.display_name == "Mamá ✨"
+
+
+# --- Caché de respuestas -------------------------------------------------------------------
+
+
+async def test_same_photo_twice_hits_the_cache(settings: Settings) -> None:
+    """La misma foto el mismo día no vuelve a llamar al proveedor (reenvío tras reinicio)."""
+    fake = FakeProvider("claude_sdk", result=STRONG)
+    chain = providers(fake)
+
+    first = await run_ingest(settings, chain)
+    assert fake.calls == 1
+
+    second = await run_ingest(settings, chain)
+    assert fake.calls == 1  # cero llamadas nuevas
+    assert second.extraction == STRONG
+    assert second.source_id != first.source_id
+
+    source = await repo.get_source(second.source_id)
+    assert source is not None
+    assert source.llm_provider == "claude_sdk"  # conserva el proveedor original
+    assert source.llm_cache_key is not None
+    assert source.raw_llm_output == STRONG.model_dump(mode="json")
+
+    calls = await repo.llm_calls("vision")
+    assert [(c.provider, c.ok) for c in calls] == [("claude_sdk", True), ("cache", True)]
+    assert calls[1].input_tokens is None and calls[1].output_tokens is None
+
+
+async def test_reject_invalidates_the_cache_entry(settings: Settings) -> None:
+    """Descartar borra la entrada: reenviar esa foto vuelve a leerla con el LLM."""
+    fake = FakeProvider("claude_sdk", result=STRONG)
+    chain = providers(fake)
+
+    first = await run_ingest(settings, chain)
+    await agenda.reject_source(first.source_id)
+
+    await run_ingest(settings, chain)
+    assert fake.calls == 2
+
+
+async def test_cache_disabled_always_calls_the_provider(settings: Settings) -> None:
+    off = settings.model_copy(update={"llm_cache_enabled": False})
+    fake = FakeProvider("claude_sdk", result=STRONG)
+    chain = providers(fake)
+    await run_ingest(off, chain)
+    await run_ingest(off, chain)
+    assert fake.calls == 2
+
+
+async def test_cache_entry_records_provider_and_model(settings: Settings) -> None:
+    fake = FakeProvider("ollama", result=STRONG)
+    await run_ingest(settings, providers(fake))
+    entries = await repo.cache_entries()
+    assert len(entries) == 1
+    assert (entries[0].provider, entries[0].model, entries[0].task) == (
+        "ollama",
+        "fake-model",
+        "vision",
+    )
+
+
+async def test_correction_is_cached(settings: Settings) -> None:
+    corrected = ExtractionResult(
+        entries=[
+            ExtractedEntry(
+                entry_date=date(2026, 9, 3), kind="bring", text="disfraz", confidence="high"
+            )
+        ],
+        doubts=[],
+        detected_language="es",
+    )
+    fake = FakeProvider("claude_sdk", result=STRONG)
+    chain = providers(fake)
+    first = await run_ingest(settings, chain)
+
+    fake.result = corrected
+    await ingest.correct_extraction(
+        first.source_id, first.extraction, "el disfraz es el jueves", settings, chain
+    )
+    calls_before = fake.calls
+
+    again = await ingest.correct_extraction(
+        first.source_id, first.extraction, "  El disfraz ES el jueves  ", settings, chain
+    )
+    assert fake.calls == calls_before  # normaliza espacios y mayúsculas
+    assert again == corrected
+    assert [c.provider for c in await repo.llm_calls("correction")] == ["claude_sdk", "cache"]

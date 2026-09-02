@@ -79,7 +79,11 @@ class ProviderHealth:
 
 @dataclass(frozen=True)
 class LLMUsage:
-    """Consumo de una llamada, para registrar en `llm_calls` (Fase 1)."""
+    """Consumo de una llamada, para registrar en `llm_calls` (Fase 1).
+
+    Los dos campos de caché van al final y con default: hay construcción posicional
+    en los tests. Solo los reportan claude_sdk y anthropic_api.
+    """
 
     provider: str
     model: str | None
@@ -87,3 +91,5 @@ class LLMUsage:
     output_tokens: int | None
     cost_usd: float | None
     duration_ms: int
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None

@@ -75,6 +75,8 @@ class OllamaProvider:
             raise LLMUnavailableError(f"ollama: HTTP {exc.status_code}: {exc.message}") from exc
         duration_ms = int((time.monotonic() - started) * 1000)
         usage = response.usage
+        # Ollama reutiliza el KV cache de prefijos por su cuenta, pero el endpoint
+        # compatible con OpenAI no reporta nada de eso: los tokens de caché quedan None.
         self.last_usage = LLMUsage(
             provider=self.name,
             model=model,

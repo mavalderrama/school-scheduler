@@ -9,6 +9,7 @@ from app.db import repo
 from app.db.models import SourceStatus
 from app.llm.schemas import ExtractionResult
 from app.log import get_logger
+from app.services import cache
 
 log = get_logger(__name__)
 
@@ -36,6 +37,13 @@ async def apply_source(source_id: int, extraction: ExtractionResult) -> ApplyRes
 
 
 async def reject_source(source_id: int) -> None:
-    """Descartar = no tocar nada; solo marca la source como rechazada."""
+    """Descartar = no tocar nada; solo marca la source como rechazada.
+
+    Además invalida la entrada de caché de esa foto: quien descarta suele hacerlo porque
+    la lectura estaba mal, así que reenviarla debe volver a leerla con el LLM.
+    """
+    source = await repo.get_source(source_id)
     await repo.set_source_status(source_id, SourceStatus.REJECTED)
+    if source is not None:
+        await cache.invalidate(source.llm_cache_key)
     log.info("source_rejected", source_id=source_id)

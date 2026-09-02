@@ -96,6 +96,13 @@ class Source(models.Model):
         db_default=SourceStatus.PENDING,
         verbose_name="estado",
     )
+    llm_cache_key = models.TextField(
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name="clave de caché",
+        help_text="Entrada de llm_cache que produjo la extracción; se borra al descartar.",
+    )
     created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
 
     class Meta:
@@ -221,6 +228,9 @@ class LLMCall(models.Model):
     model = models.TextField(null=True, blank=True, verbose_name="modelo")
     input_tokens = models.IntegerField(null=True, blank=True)
     output_tokens = models.IntegerField(null=True, blank=True)
+    # Solo los reportan claude_sdk y anthropic_api; Ollama no expone info de caché.
+    cache_read_tokens = models.IntegerField(null=True, blank=True)
+    cache_write_tokens = models.IntegerField(null=True, blank=True)
     cost_usd = models.DecimalField(max_digits=10, decimal_places=6, null=True, blank=True)
     duration_ms = models.IntegerField(null=True, blank=True)
     ok = models.BooleanField()
@@ -234,3 +244,31 @@ class LLMCall(models.Model):
 
     def __str__(self) -> str:
         return f"{self.provider}/{self.task} ({'ok' if self.ok else 'error'})"
+
+
+class LLMCacheEntry(models.Model):
+    """Caché de respuestas por coincidencia exacta: un repetido no gasta tokens.
+
+    La clave incluye la fecha de hoy y la versión de los prompts, así que una consulta
+    con fechas relativas falla correctamente al día siguiente y editar un prompt
+    invalida la caché sola (ver `app/llm/cache.py`).
+    """
+
+    key = models.CharField(max_length=64, unique=True, verbose_name="clave")
+    task = models.TextField(choices=LLMTask, verbose_name="tarea")
+    prompt_version = models.CharField(max_length=64, verbose_name="versión de prompts")
+    provider = models.TextField(verbose_name="proveedor original")
+    model = models.TextField(null=True, blank=True, verbose_name="modelo")
+    response = models.JSONField(verbose_name="respuesta")
+    hits = models.IntegerField(default=0, db_default=0, verbose_name="aciertos")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+    last_hit_at = models.DateTimeField(null=True, blank=True, verbose_name="último acierto")
+    expires_at = models.DateTimeField(db_index=True, verbose_name="expira")
+
+    class Meta:
+        db_table = "llm_cache"
+        verbose_name = "entrada de caché"
+        verbose_name_plural = "entradas de caché"
+
+    def __str__(self) -> str:
+        return f"{self.task}/{self.provider} ({self.hits} aciertos)"

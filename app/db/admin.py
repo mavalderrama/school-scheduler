@@ -13,6 +13,7 @@ from django.http import HttpRequest
 from app.db.models import (
     AgendaEntry,
     ConversationMessage,
+    LLMCacheEntry,
     LLMCall,
     NotificationLog,
     Source,
@@ -111,6 +112,8 @@ class LLMCallAdmin(ReadOnlyMixin, admin.ModelAdmin[LLMCall]):
         "model",
         "input_tokens",
         "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
         "cost_usd",
         "duration_ms",
         "ok",
@@ -119,3 +122,26 @@ class LLMCallAdmin(ReadOnlyMixin, admin.ModelAdmin[LLMCall]):
     list_filter = ["provider", "task", "ok"]
     search_fields = ["model", "error"]
     ordering = ["-id"]
+
+
+@admin.register(LLMCacheEntry)
+class LLMCacheEntryAdmin(ReadOnlyMixin, admin.ModelAdmin[LLMCacheEntry]):
+    """Caché de respuestas: solo lectura, pero se puede vaciar desde aquí si hace falta."""
+
+    list_display = [
+        "id",
+        "task",
+        "provider",
+        "model",
+        "hits",
+        "created_at",
+        "last_hit_at",
+        "expires_at",
+    ]
+    list_filter = ["task", "provider"]
+    search_fields = ["key"]
+    date_hierarchy = "created_at"
+    ordering = ["-id"]
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        return True  # la caché es material desechable, no un dato versionado

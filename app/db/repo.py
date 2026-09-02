@@ -12,16 +12,18 @@ Convención con el ORM async de Django:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections, transaction
+from django.db.models import F
 
 from app.db.models import (
     AgendaEntry,
+    LLMCacheEntry,
     LLMCall,
     NotificationKind,
     NotificationLog,
@@ -197,18 +199,79 @@ async def log_llm_call(
     error: str | None,
     usage: LLMUsage | None,
     duration_ms: int,
+    model: str | None = None,
 ) -> None:
     await LLMCall.objects.acreate(
         provider=provider,
         task=task,
-        model=usage.model if usage else None,
+        model=usage.model if usage else model,
         input_tokens=usage.input_tokens if usage else None,
         output_tokens=usage.output_tokens if usage else None,
+        cache_read_tokens=usage.cache_read_tokens if usage else None,
+        cache_write_tokens=usage.cache_write_tokens if usage else None,
         cost_usd=Decimal(str(usage.cost_usd)) if usage and usage.cost_usd is not None else None,
         duration_ms=usage.duration_ms if usage else duration_ms,
         ok=ok,
         error=error,
     )
+
+
+# --- Caché de respuestas del LLM -----------------------------------------------------------
+
+
+async def get_cache_entry(key: str, *, now: datetime) -> LLMCacheEntry | None:
+    """Entrada vigente (no expirada) para la clave."""
+    return await LLMCacheEntry.objects.filter(key=key, expires_at__gt=now).afirst()
+
+
+async def upsert_cache_entry(
+    key: str,
+    *,
+    task: str,
+    prompt_version: str,
+    provider: str,
+    model: str | None,
+    response: dict[str, Any],
+    expires_at: datetime,
+) -> None:
+    await LLMCacheEntry.objects.aupdate_or_create(
+        key=key,
+        defaults={
+            "task": task,
+            "prompt_version": prompt_version,
+            "provider": provider,
+            "model": model,
+            "response": response,
+            "expires_at": expires_at,
+        },
+        create_defaults={
+            "task": task,
+            "prompt_version": prompt_version,
+            "provider": provider,
+            "model": model,
+            "response": response,
+            "expires_at": expires_at,
+            "hits": 0,
+        },
+    )
+
+
+async def touch_cache_entry(key: str, *, when: datetime) -> None:
+    await LLMCacheEntry.objects.filter(key=key).aupdate(hits=F("hits") + 1, last_hit_at=when)
+
+
+async def delete_cache_entry(key: str) -> bool:
+    deleted, _ = await LLMCacheEntry.objects.filter(key=key).adelete()
+    return bool(deleted)
+
+
+async def purge_expired_cache(now: datetime) -> int:
+    deleted, _ = await LLMCacheEntry.objects.filter(expires_at__lte=now).adelete()
+    return int(deleted)
+
+
+async def cache_entries() -> list[LLMCacheEntry]:
+    return [entry async for entry in LLMCacheEntry.objects.order_by("id")]
 
 
 async def llm_calls(task: str | None = None) -> list[LLMCall]:

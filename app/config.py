@@ -128,6 +128,10 @@ class Settings(DjangoSettings):
     llm_text_timeout: int = 60
     llm_retry_after_min: int = 60
 
+    # --- Caché de respuestas del LLM ---
+    llm_cache_enabled: bool = True
+    llm_cache_ttl_days: int = 30
+
     # --- Ollama ---
     ollama_base_url: str | None = None
     ollama_vision_model: str = "qwen3-vl:8b"

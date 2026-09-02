@@ -234,8 +234,37 @@ class ClaudeSDKProvider:
         )
 
 
+def _cache_tokens(usage: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Tokens de caché del CLI.
+
+    El `usage` de nivel superior viene con la forma de la API (snake_case). Si no
+    los trae, se suman los de `modelUsage`, que el SDK pasa tal cual desde el CLI
+    en camelCase (ver `ModelUsage` en claude_agent_sdk/types.py).
+    """
+    read = usage.get("cache_read_input_tokens")
+    write = usage.get("cache_creation_input_tokens")
+    if read is not None or write is not None:
+        return read, write
+
+    per_model = usage.get("modelUsage")
+    if not isinstance(per_model, dict):
+        return None, None
+    totals = [0, 0]
+    found = False
+    for entry in per_model.values():
+        if not isinstance(entry, dict):
+            continue
+        for index, field in enumerate(("cacheReadInputTokens", "cacheCreationInputTokens")):
+            value = entry.get(field)
+            if isinstance(value, int):
+                totals[index] += value
+                found = True
+    return (totals[0], totals[1]) if found else (None, None)
+
+
 def _usage_from_result(result: ResultMessage, model: str, duration_ms: int) -> LLMUsage:
     usage = result.usage or {}
+    cache_read, cache_write = _cache_tokens(usage)
     return LLMUsage(
         provider="claude_sdk",
         model=model,
@@ -243,4 +272,6 @@ def _usage_from_result(result: ResultMessage, model: str, duration_ms: int) -> L
         output_tokens=usage.get("output_tokens"),
         cost_usd=result.total_cost_usd,
         duration_ms=duration_ms,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
     )

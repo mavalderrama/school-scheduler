@@ -91,6 +91,8 @@ class AnthropicAPIProvider:
             output_tokens=response.usage.output_tokens,
             cost_usd=None,
             duration_ms=duration_ms,
+            cache_read_tokens=response.usage.cache_read_input_tokens,
+            cache_write_tokens=response.usage.cache_creation_input_tokens,
         )
         for block in response.content:
             if block.type == "tool_use" and block.name == "emit" and isinstance(block.input, dict):
