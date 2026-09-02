@@ -25,10 +25,23 @@ from claude_agent_sdk import (
 
 from app.config import Settings
 from app.llm.json_out import validate_with_retry
-from app.llm.prompting import correction_prompt, extraction_prompt, intent_prompt
+from app.llm.prompting import (
+    correction_prompt,
+    extraction_prompt,
+    intent_prompt,
+    refine_prompt,
+)
 from app.llm.prompts import load_prompt
 from app.llm.provider import LLMOutputError, LLMQuotaError, LLMUnavailableError
-from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, OkProbe, ProviderHealth
+from app.llm.schemas import (
+    ChatTurn,
+    ExtractionResult,
+    Intent,
+    LLMUsage,
+    OkProbe,
+    ProviderHealth,
+    QAPair,
+)
 from app.log import get_logger
 
 log = get_logger(__name__)
@@ -183,6 +196,22 @@ class ClaudeSDKProvider:
         self, extraction: ExtractionResult, correction: str, today: date
     ) -> ExtractionResult:
         prompt = correction_prompt(extraction, correction, today, self._tz)
+
+        async def call(hint: str | None) -> dict[str, Any]:
+            data, _ = await self._run_json(
+                prompt + (hint or ""),
+                tools=[],
+                schema=ExtractionResult.model_json_schema(),
+                max_turns=1,
+            )
+            return data
+
+        return await validate_with_retry(ExtractionResult, call, provider=self.name)
+
+    async def refine_extraction(
+        self, extraction: ExtractionResult, pairs: list[QAPair], today: date
+    ) -> ExtractionResult:
+        prompt = refine_prompt(extraction, pairs, today, self._tz)
 
         async def call(hint: str | None) -> dict[str, Any]:
             data, _ = await self._run_json(

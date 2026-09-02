@@ -25,6 +25,7 @@ from app.llm.schemas import (
     Intent,
     LLMUsage,
     ProviderHealth,
+    QAPair,
 )
 from tests.conftest import make_settings
 
@@ -58,6 +59,9 @@ class FakeProvider:
         self.calls = 0
         self.last_usage: LLMUsage | None = None
         self.corrections: list[str] = []
+        self.refinements: list[list[QAPair]] = []
+        # Si se fija, `refine_extraction` la devuelve en vez de `result`.
+        self.refined: ExtractionResult | None = None
 
     async def _maybe_fail(self) -> None:
         self.calls += 1
@@ -77,6 +81,13 @@ class FakeProvider:
         await self._maybe_fail()
         self.corrections.append(correction)
         return self.result
+
+    async def refine_extraction(
+        self, extraction: ExtractionResult, pairs: list[QAPair], today: date
+    ) -> ExtractionResult:
+        await self._maybe_fail()
+        self.refinements.append(list(pairs))
+        return self.refined or self.result
 
     async def classify_intent(
         self, text: str, history: list[ChatTurn], today: date, has_pending: bool

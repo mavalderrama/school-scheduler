@@ -12,10 +12,13 @@ from django.http import HttpRequest
 
 from app.db.models import (
     AgendaEntry,
+    CalendarException,
     ConversationMessage,
     LLMCacheEntry,
     LLMCall,
     NotificationLog,
+    ScheduleSlot,
+    ScheduleTemplate,
     Source,
     User,
 )
@@ -145,3 +148,45 @@ class LLMCacheEntryAdmin(ReadOnlyMixin, admin.ModelAdmin[LLMCacheEntry]):
 
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
         return True  # la caché es material desechable, no un dato versionado
+
+
+class ScheduleSlotInline(admin.TabularInline[ScheduleSlot, ScheduleTemplate]):
+    """Las franjas se editan dentro del horario: corregir una materia mal leída es común."""
+
+    model = ScheduleSlot
+    extra = 0
+    fields = ["week_index", "week_label", "weekday", "rotation", "subject", "note"]
+    ordering = ["week_index", "weekday"]
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        return False
+
+
+@admin.register(ScheduleTemplate)
+class ScheduleTemplateAdmin(NoDeleteMixin, admin.ModelAdmin[ScheduleTemplate]):
+    list_display = [
+        "name",
+        "anchor_monday",
+        "cycle_weeks",
+        "valid_from",
+        "valid_to",
+        "is_active",
+        "created_at",
+    ]
+    list_filter = ["is_active"]
+    readonly_fields = ["source", "superseded_by", "created_at"]
+    inlines = [ScheduleSlotInline]
+
+
+@admin.register(CalendarException)
+class CalendarExceptionAdmin(NoDeleteMixin, admin.ModelAdmin[CalendarException]):
+    """Lo que la librería de festivos no puede saber: receso, jornadas pedagógicas.
+
+    Se edita a mano una vez al año. `class_day` sirve para decir que un festivo nacional
+    sí es día de clase en este colegio.
+    """
+
+    list_display = ["day", "kind", "label", "created_at"]
+    list_filter = ["kind"]
+    ordering = ["-day"]
+    search_fields = ["label"]

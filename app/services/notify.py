@@ -16,9 +16,11 @@ from datetime import date, timedelta
 from app.config import Settings
 from app.db import repo
 from app.db.models import AgendaEntry, NotificationKind
-from app.llm.compose import KIND_LABELS, format_date_es
+from app.llm.compose import KIND_LABELS, format_date_es, slot_line
 from app.llm.prompting import weekday_es
 from app.log import get_logger
+from app.services import schedule as schedule_service
+from app.services.schedule import SlotResult
 
 log = get_logger(__name__)
 
@@ -58,9 +60,13 @@ def next_week_days(today: date) -> list[date]:
 # --- Textos ------------------------------------------------------------------------------
 
 
-def format_daily(target: date, entries: Sequence[AgendaEntry]) -> str:
-    """Formato de 7.3: una línea por tipo, ítems separados por coma."""
+def format_daily(
+    target: date, entries: Sequence[AgendaEntry], slot: SlotResult | None = None
+) -> str:
+    """Formato de 7.3, con la clase del horario primero si la hay."""
     lines = [f"📚 Mañana, {format_date_es(target)}"]
+    if slot is not None:
+        lines.append(slot_line(slot))
     for kind in KIND_ORDER:
         texts = [html.escape(e.text) for e in entries if e.kind == kind]
         if texts:
@@ -78,10 +84,15 @@ def format_gaps(gaps: Sequence[date]) -> str:
     return f"📅 Para la semana que viene no tengo nada para: {days}. ¿Me mandan foto de la agenda?"
 
 
-async def build_daily_message(target: date) -> tuple[NotificationKind, str]:
+async def build_daily_message(
+    target: date, *, country: str = "CO", use_schedule: bool = True
+) -> tuple[NotificationKind, str]:
+    """Lo de mañana. El horario cuenta como contenido: si hay clase (o si mañana es festivo)
+    hay algo que decir, y el aviso de agenda vacía deja de ser la única opción."""
     entries = await repo.active_entries(target, target)
-    if entries:
-        return NotificationKind.DAILY, format_daily(target, entries)
+    slot = await schedule_service.resolve(target, country=country) if use_schedule else None
+    if entries or slot is not None:
+        return NotificationKind.DAILY, format_daily(target, entries, slot)
     return NotificationKind.NUDGE_EMPTY, format_nudge(target)
 
 
@@ -123,7 +134,9 @@ async def send_daily(send: Sender, settings: Settings, today: date) -> list[Outc
     if target is None:
         log.info("notify_weekend_skip", today=today.isoformat())
         return []
-    kind, text = await build_daily_message(target)
+    kind, text = await build_daily_message(
+        target, country=settings.school_country, use_schedule=settings.schedule_enabled
+    )
     return await _send_to_chats(
         send,
         settings.notify_chat_ids,

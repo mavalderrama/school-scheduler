@@ -18,7 +18,7 @@ from app.config import Settings
 from app.db import repo
 from app.db.models import SourceKind, SourceStatus
 from app.llm.provider import LLMAttempt, LLMError, LLMProviders, LLMQuotaError
-from app.llm.schemas import ExtractionResult
+from app.llm.schemas import ExtractionResult, QAPair
 from app.log import get_logger
 from app.services import cache
 
@@ -251,4 +251,99 @@ async def correct_extraction(
         source_id, raw_llm_output=run.value.model_dump(mode="json"), llm_provider=run.provider
     )
     log.info("extraction_corrected", source_id=source_id, provider=run.provider, from_cache=False)
+    return run.value
+
+
+# --- Preguntas de seguimiento ---------------------------------------------------------------
+
+MAX_REFINE_ROUNDS = 2
+"""Rondas de preguntas antes de rendirse. Preguntar en bucle es peor que decir que no se pudo."""
+
+
+def missing_essentials(extraction: ExtractionResult) -> list[str]:
+    """Qué falta para poder guardar esto. Lo decide **Python**, no el modelo.
+
+    El modelo puede proponer preguntas en `extraction.questions`, pero la lista de lo
+    imprescindible sale de aquí: es lo que impide que una respuesta convincente del LLM
+    acabe guardando un horario sin ancla, que sería inutilizable.
+    """
+    if extraction.doc_type != "schedule":
+        return []
+
+    schedule = extraction.schedule
+    if schedule is None or not schedule.slots:
+        return ["No pude leer las filas del horario. ¿Me mandas la foto más nítida o completa?"]
+
+    missing: list[str] = []
+    if schedule.anchor_monday is None:
+        labels = [s.week_label for s in schedule.slots]
+        first = labels[0] if labels else "A"
+        missing.append(
+            f"¿Qué lunes empezó la Semana {first}? Puedes decirme cualquier día de esa "
+            "semana y yo saco el lunes."
+        )
+    elif schedule.anchor_monday.weekday() != 0:
+        missing.append(
+            f"Me diste el {schedule.anchor_monday.isoformat()}, que no es lunes. "
+            "¿Qué lunes empezó el ciclo?"
+        )
+    return missing
+
+
+def pending_questions(extraction: ExtractionResult) -> list[str]:
+    """Lo esencial primero y luego lo que proponga el modelo, sin repetir."""
+    questions = missing_essentials(extraction)
+    seen = {q.strip().lower() for q in questions}
+    for extra in extraction.questions:
+        text = extra.strip()
+        if text and text.lower() not in seen:
+            questions.append(text)
+            seen.add(text.lower())
+    return questions
+
+
+async def refine_extraction(
+    source_id: int,
+    extraction: ExtractionResult,
+    pairs: list[QAPair],
+    settings: Settings,
+    providers: LLMProviders,
+) -> ExtractionResult:
+    """Reinterpreta la extracción con las respuestas del usuario (cadena de texto + caché)."""
+    today = datetime.now(settings.zoneinfo).date()
+    key = cache.build_key(
+        task="refine",
+        today=today,
+        tz=settings.tz,
+        inputs=[
+            cache.hash_text(extraction.model_dump_json()),
+            cache.hash_text("\n".join(f"{p.question}|{p.answer}" for p in pairs)),
+        ],
+    )
+
+    started = time.monotonic()
+    hit = await cache.get(ExtractionResult, key, settings)
+    if hit is not None:
+        await _log_cache_hit("refine", hit, int((time.monotonic() - started) * 1000))
+        await repo.update_source(source_id, raw_llm_output=hit.value.model_dump(mode="json"))
+        return hit.value
+
+    try:
+        run = await providers.text.run(lambda p: p.refine_extraction(extraction, pairs, today))
+    except LLMError as exc:
+        await _log_attempts("refine", exc.attempts)
+        raise
+    await _log_attempts("refine", run.attempts)
+    await cache.put(
+        key,
+        task="refine",
+        provider=run.provider,
+        model=_model_of(run.attempts),
+        value=run.value,
+        settings=settings,
+    )
+    await repo.update_source(
+        source_id, raw_llm_output=run.value.model_dump(mode="json"), llm_provider=run.provider
+    )
+    log.info("extraction_refined", source_id=source_id, provider=run.provider, answers=len(pairs))
     return run.value

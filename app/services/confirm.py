@@ -1,8 +1,9 @@
 """Ciclo de confirmación: una confirmación pendiente por chat y cola de fotos en espera.
 
-Lo pendiente puede ser una foto (`PendingPhoto`, con su ciclo ✅/✏️/❌) o una edición por
-texto (`PendingEdit`, alta o baja con ✅/❌). Solo hay una a la vez por chat, como pide el
-plan; las fotos que lleguen mientras tanto esperan en cola.
+Lo pendiente puede ser una foto (`PendingPhoto`, con su ciclo ✅/✏️/❌), una edición por
+texto (`PendingEdit`, alta o baja con ✅/❌) o un interrogatorio (`PendingQuestions`: al bot
+le faltan datos esenciales y los pregunta antes de guardar nada). Solo hay una cosa a la vez
+por chat, como pide el plan; las fotos que lleguen mientras tanto esperan en cola.
 
 Estado en memoria del proceso. Si el bot se reinicia con una confirmación pendiente, la
 source queda `pending` en la DB y el usuario vuelve a mandar la foto (Fase 4 persiste esto).
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
 
-from app.llm.schemas import ExtractionResult
+from app.llm.schemas import ExtractionResult, QAPair
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,38 @@ class PendingEdit:
     entry_id: int | None = None  # solo en `remove`
 
 
-Pending = PendingPhoto | PendingEdit
+@dataclass
+class PendingQuestions:
+    """Extracción incompleta: el bot pregunta lo que falta antes de guardar.
+
+    `attempts` corta el bucle: si dos rondas de respuestas no resuelven lo esencial, el bot
+    lo dice en vez de seguir preguntando lo mismo.
+    """
+
+    source_id: int
+    chat_id: int
+    extraction: ExtractionResult
+    questions: list[str]
+    answers: list[QAPair] = field(default_factory=list)
+    attempts: int = 0
+
+    @property
+    def current(self) -> str | None:
+        """La pregunta que toca, o None si ya se respondieron todas las de esta ronda."""
+        asked = len(self.answers)
+        return self.questions[asked] if asked < len(self.questions) else None
+
+    def answer(self, text: str) -> None:
+        question = self.current
+        if question is not None:
+            self.answers.append(QAPair(question=question, answer=text))
+
+    @property
+    def complete(self) -> bool:
+        return self.current is None
+
+
+Pending = PendingPhoto | PendingEdit | PendingQuestions
 
 
 @dataclass
@@ -68,6 +100,11 @@ class PendingStore:
         """Lo pendiente solo si es una foto (para el ciclo de corrección)."""
         current = self._pending.get(chat_id)
         return current if isinstance(current, PendingPhoto) else None
+
+    def questions(self, chat_id: int) -> PendingQuestions | None:
+        """Lo pendiente solo si es un interrogatorio abierto."""
+        current = self._pending.get(chat_id)
+        return current if isinstance(current, PendingQuestions) else None
 
     def set(self, pending: Pending) -> None:
         self._pending[pending.chat_id] = pending

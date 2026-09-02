@@ -166,3 +166,84 @@ async def test_gap_check_silent_when_week_is_covered(settings: Settings) -> None
     sender = FakeSender()
     assert await notify.send_gap_check(sender, settings, SUN) == []
     assert sender.sent == []
+
+
+# --- Fase 6: el horario cuenta como contenido -----------------------------------------------
+
+
+async def seed_schedule(anchor: date = date(2026, 8, 31)) -> None:
+    """El horario K4A, reducido a las franjas que usan estos tests."""
+    from app.llm.schemas import ScheduleDraft, SlotDraft
+
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100999)
+    await agenda.apply_source(
+        source.pk,
+        ExtractionResult(
+            entries=[],
+            doubts=[],
+            detected_language="es",
+            doc_type="schedule",
+            schedule=ScheduleDraft(
+                name="Horario K4A",
+                cycle_weeks=2,
+                anchor_monday=anchor,
+                slots=[
+                    SlotDraft(week_label="A", weekday=1, rotation="1", subject="Artes plásticas"),
+                    SlotDraft(
+                        week_label="A", weekday=2, rotation="2", subject="Expresión corporal"
+                    ),
+                    SlotDraft(week_label="B", weekday=1, rotation="6", subject="Deporte 2"),
+                    SlotDraft(week_label="B", weekday=2, rotation="7", subject="Motricidad"),
+                ],
+            ),
+        ),
+        today=anchor,
+    )
+
+
+async def test_a_class_replaces_the_empty_nudge(settings: Settings) -> None:
+    """Antes, sin entradas, solo salía «mándame foto». Ahora se avisa de la clase."""
+    await seed_schedule()
+    send = FakeSender()
+    outcomes = await notify.send_daily(send, settings, MON)  # mañana es martes 8, Semana B
+
+    assert [o.kind for o in outcomes] == [NotificationKind.DAILY]
+    text = send.sent[0][1]
+    assert "Motricidad" in text and "Semana B" in text and "rot. 7" in text
+    assert "¿Me mandan foto?" not in text
+
+
+async def test_the_class_comes_before_the_agenda_entries(settings: Settings) -> None:
+    await seed_schedule()
+    await seed((TUE, "bring", "sudadera"))
+    send = FakeSender()
+    await notify.send_daily(send, settings, MON)
+
+    text = send.sent[0][1]
+    assert text.index("Motricidad") < text.index("sudadera")
+
+
+async def test_a_holiday_is_announced_instead_of_asking_for_a_photo(settings: Settings) -> None:
+    """El 12 de octubre de 2026 es lunes festivo: mejor decirlo que pedir una foto."""
+    await seed_schedule()
+    send = FakeSender()
+    await notify.send_daily(send, settings, date(2026, 10, 11))  # domingo -> mañana lunes 12
+
+    text = send.sent[0][1]
+    assert "sin clase" in text and "Día de la Raza" in text
+
+
+async def test_without_a_schedule_the_nudge_still_works(settings: Settings) -> None:
+    """Sin horario cargado no se inventa nada: sigue el aviso de agenda vacía."""
+    send = FakeSender()
+    outcomes = await notify.send_daily(send, settings, MON)
+    assert [o.kind for o in outcomes] == [NotificationKind.NUDGE_EMPTY]
+    assert "¿Me mandan foto?" in send.sent[0][1]
+
+
+async def test_the_schedule_can_be_turned_off(settings: Settings) -> None:
+    await seed_schedule()
+    off = settings.model_copy(update={"schedule_enabled": False})
+    send = FakeSender()
+    outcomes = await notify.send_daily(send, off, MON)
+    assert [o.kind for o in outcomes] == [NotificationKind.NUDGE_EMPTY]

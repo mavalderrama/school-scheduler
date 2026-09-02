@@ -12,7 +12,7 @@ Convención con el ORM async de Django:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -23,18 +23,21 @@ from django.db.models import Count, F, Q, Sum
 
 from app.db.models import (
     AgendaEntry,
+    CalendarException,
     ConversationMessage,
     LLMCacheEntry,
     LLMCall,
     NotificationKind,
     NotificationLog,
+    ScheduleSlot,
+    ScheduleTemplate,
     Source,
     SourceKind,
     SourceStatus,
     User,
     UserRole,
 )
-from app.llm.schemas import ChatTurn, ExtractedEntry, LLMUsage
+from app.llm.schemas import ChatTurn, ExtractedEntry, LLMUsage, ScheduleDraft, SlotDraft
 
 # --- Arranque y conexiones ---------------------------------------------------------
 
@@ -510,3 +513,94 @@ def _table_constraints(table: str) -> dict[str, Any]:
 async def table_constraints(table: str) -> dict[str, Any]:
     """Índices y constraints de una tabla, por nombre (para tests y /estado)."""
     return await sync_to_async(_table_constraints)(table)
+
+
+# --- Horario rotativo y calendario ------------------------------------------------------
+
+
+def _apply_schedule(source_id: int, draft: ScheduleDraft, *, valid_from: date) -> int:
+    """Guarda un horario nuevo y desactiva el anterior. Todo en una transacción.
+
+    Igual que con las entradas por fecha, no se edita ni se borra nada: la plantilla
+    anterior queda `is_active=False` con `superseded_by` apuntando a esta source.
+    """
+    if draft.anchor_monday is None:
+        raise ValueError("el horario no tiene lunes ancla")
+    with transaction.atomic():
+        source = Source.objects.select_for_update().get(pk=source_id)
+        ScheduleTemplate.objects.filter(is_active=True).exclude(source_id=source_id).update(
+            is_active=False, superseded_by=source, valid_to=valid_from - timedelta(days=1)
+        )
+        labels = _week_labels(draft)
+        template = ScheduleTemplate.objects.create(
+            name=draft.name or "Horario",
+            anchor_monday=draft.anchor_monday,
+            cycle_weeks=draft.cycle_weeks,
+            valid_from=valid_from,
+            source=source,
+        )
+        ScheduleSlot.objects.bulk_create(
+            [
+                ScheduleSlot(
+                    schedule=template,
+                    week_index=labels[slot.week_label],
+                    week_label=slot.week_label,
+                    weekday=slot.weekday,
+                    rotation=slot.rotation,
+                    subject=slot.subject,
+                )
+                for slot in _unique_slots(draft)
+            ]
+        )
+        source.status = SourceStatus.CONFIRMED
+        source.save(update_fields=["status"])
+        return template.pk
+
+
+async def apply_schedule(source_id: int, draft: ScheduleDraft, *, valid_from: date) -> int:
+    return await sync_to_async(_apply_schedule)(source_id, draft, valid_from=valid_from)
+
+
+def _week_labels(draft: ScheduleDraft) -> dict[str, int]:
+    """Etiqueta de semana -> índice del ciclo, en el orden en que aparecen en la foto."""
+    labels: dict[str, int] = {}
+    for slot in draft.slots:
+        if slot.week_label not in labels:
+            labels[slot.week_label] = len(labels)
+    return labels
+
+
+def _unique_slots(draft: ScheduleDraft) -> list[SlotDraft]:
+    """Una franja por (semana, día): el unique de la tabla no admite repetidos."""
+    seen: dict[tuple[str, int], SlotDraft] = {}
+    for slot in draft.slots:
+        seen.setdefault((slot.week_label, slot.weekday), slot)
+    return list(seen.values())
+
+
+async def active_schedule(day: date | None = None) -> ScheduleTemplate | None:
+    """Plantilla vigente (la que cubre `day`, o la más reciente si no se pasa día)."""
+    qs = ScheduleTemplate.objects.filter(is_active=True)
+    if day is not None:
+        qs = qs.filter(valid_from__lte=day).filter(Q(valid_to__isnull=True) | Q(valid_to__gte=day))
+    return await qs.order_by("-valid_from", "-id").afirst()
+
+
+async def schedule_slots(schedule_id: int) -> list[ScheduleSlot]:
+    qs = ScheduleSlot.objects.filter(schedule_id=schedule_id).order_by(
+        "week_index", "weekday", "id"
+    )
+    return [slot async for slot in qs]
+
+
+async def calendar_exceptions() -> dict[date, tuple[str, str]]:
+    """Día -> (tipo, motivo). Son pocas filas al año: se cargan enteras."""
+    qs = CalendarException.objects.all().order_by("day")
+    return {row.day: (row.kind, row.label) async for row in qs}
+
+
+async def add_calendar_exception(day: date, kind: str, label: str) -> CalendarException:
+    row, _ = await CalendarException.objects.aupdate_or_create(
+        day=day, defaults={"kind": kind, "label": label}
+    )
+    return row

@@ -157,6 +157,9 @@ class Settings(DjangoSettings):
     daily_notify_time: str = "19:00"
     gap_check_time: str = "18:00"
     skip_weekend: bool = True
+    # Horario rotativo y calendario escolar (Fase 6).
+    schedule_enabled: bool = True
+    school_country: str = "CO"
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
 

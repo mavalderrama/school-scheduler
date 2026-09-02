@@ -44,6 +44,7 @@ El LLM es **intercambiable por configuración**: modelo abierto self-hosted (Oll
 | Lenguaje | Python 3.12 | Ecosistema de Telegram + LLM + Postgres maduro |
 | Telegram | `aiogram` 3.x, **long polling** | Polling = solo tráfico saliente. No hay que exponer nada a internet, ni túnel, ni HTTPS, ni webhook |
 | LLM | Abstracción `LLMProvider` con tres implementaciones (sección 3) | Cambiar de proveedor sin tocar la lógica del bot |
+| Festivos | **`holidays`** (Fase 6) | Los festivos colombianos se corren al lunes por la Ley Emiliani; hacerlo a mano se hace mal. Los días sin clase propios del colegio van en `calendar_exceptions`, que ninguna librería puede conocer |
 | Base de datos | **PostgreSQL 18 + `pgvector`** (imagen `pgvector/pgvector:0.8.6-pg18-trixie`) | Consultas por rango de fechas, integridad referencial, versionado de entradas. La extensión `vector` se crea en la migración 0001; qué columnas vectorizar se decide más adelante |
 | ORM / migraciones / admin | **Django 6.1** (ORM, migraciones, admin) con `psycopg` 3 | Decisión del 2026-09-02: el admin de Django sirve de panel de operación sin construir UI. El admin corre **dentro del proceso del bot** (uvicorn como tarea del event loop), publicado solo en la LAN |
 | Scheduler | APScheduler (`AsyncIOScheduler`) dentro del proceso del bot | Un solo proceso, sin cron externo |
@@ -316,6 +317,54 @@ CREATE TABLE llm_cache (            -- caché de respuestas por coincidencia exa
 CREATE INDEX ON llm_cache (expires_at);
 ```
 
+Añadido en la Fase 6 (migración `0004`, ver sección 10):
+
+```sql
+CREATE TABLE schedules (            -- horario rotativo (Semana A / Semana B)
+  id               BIGSERIAL PRIMARY KEY,
+  name             TEXT NOT NULL,
+  anchor_monday    DATE NOT NULL,    -- lunes de la primera semana del ciclo
+  cycle_weeks      SMALLINT NOT NULL DEFAULT 2,
+  valid_from       DATE NOT NULL,
+  valid_to         DATE,
+  holiday_policy   TEXT NOT NULL DEFAULT 'skip_day'
+                   CHECK (holiday_policy IN ('skip_day','shift')),
+  source_id        BIGINT NOT NULL REFERENCES sources(id),
+  is_active        BOOLEAN NOT NULL DEFAULT true,
+  superseded_by    BIGINT REFERENCES sources(id),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON schedules (valid_from) WHERE is_active;
+
+CREATE TABLE schedule_slots (       -- una franja: semana del ciclo + día -> materia
+  id               BIGSERIAL PRIMARY KEY,
+  schedule_id      BIGINT NOT NULL REFERENCES schedules(id),
+  week_index       SMALLINT NOT NULL CHECK (week_index >= 0),  -- 0 = A, 1 = B
+  week_label       TEXT NOT NULL,
+  weekday          SMALLINT NOT NULL CHECK (weekday BETWEEN 1 AND 7),  -- ISO
+  rotation         TEXT,             -- TEXT, no entero: la última franja es "Cultural"
+  subject          TEXT NOT NULL,
+  note             TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (schedule_id, week_index, weekday)
+);
+
+CREATE TABLE calendar_exceptions (  -- lo que la librería de festivos no puede saber
+  id               BIGSERIAL PRIMARY KEY,
+  day              DATE NOT NULL UNIQUE,
+  kind             TEXT NOT NULL
+                   CHECK (kind IN ('holiday','school_closed','class_day')),
+  label            TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+**Semántica del horario (implementar en `services/schedule.py` y `services/schoolcal.py`):**
+- La semana del ciclo es `((lunes(d) − anchor_monday).days // 7) % cycle_weeks`. No depende del número de semana ISO, así que cruza el fin de año sin saltos.
+- Los festivos nacionales **no se guardan**: los calcula la librería `holidays` en ejecución (conoce la Ley Emiliani, que corre festivos al lunes). `calendar_exceptions` es solo para lo del colegio, y `class_day` anula un festivo nacional en el que sí hay clase.
+- Política `skip_day` (la de este colegio): un día no lectivo **no desplaza la rotación**. La semana sigue siendo la que le toca por calendario y esa rotación se pierde esa vuelta.
+- Una foto nueva del horario desactiva la plantilla anterior (`is_active=false`, `superseded_by`, `valid_to` cerrado el día antes de la nueva). Nada se borra.
+
 **Semántica de merge (implementar en `services/agenda.py`):**
 - Al confirmar una `source` con entradas para las fechas `{D1, D2, ...}`: para cada fecha, marcar `is_active=false, superseded_by=<nueva source>` en las entradas activas previas de esa fecha, e insertar las nuevas. Todo en una transacción.
 - Una corrección por texto que solo toca una entrada ("quita lo del jueves") genera una `source kind='text_correction'` y desactiva solo esa entrada (no toda la fecha).
@@ -520,6 +569,13 @@ Validación en arranque (`config.py`): fallar con mensaje claro si un proveedor 
 - Comando `/estado`: última notificación, últimas 3 sources con su proveedor, salud de cada proveedor, consumo del mes desde `llm_calls` (llamadas y tokens por proveedor), fecha de emisión del token de suscripción.
 - `pg_dump` nocturno. README con runbook: cambiar de proveedor o de modelo, rotar el token de suscripción, restaurar backup, agregar un usuario.
 - **Acepta cuando:** el bot lleva 7 días corriendo sin intervención manual, con al menos 3 fotos ingresadas y 7 notificaciones enviadas, y `/estado` muestra el consumo por proveedor.
+
+### Fase 6 — Horario rotativo, festivos y preguntas de seguimiento
+- Tablas `schedules`, `schedule_slots` y `calendar_exceptions` (migración `0004`). `ExtractionResult.doc_type` (`agenda` | `schedule`) para que una sola llamada de visión distinga una página de agenda de una tabla de horario.
+- `services/schedule.py` (aritmética del ciclo, determinista) y `services/schoolcal.py` (festivos con `holidays` + excepciones del colegio). Ninguno usa LLM.
+- Estado `PendingQuestions`: si falta un dato esencial (el lunes en que empezó el ciclo), el bot **pregunta antes de guardar** en vez de limitarse a mostrar las dudas. Qué es esencial lo decide Python; el modelo solo propone preguntas extra. `refine_extraction` en los tres proveedores aplica las respuestas.
+- La clase del día entra en la notificación diaria, `/hoy`, `/manana`, `/semana` y `/estado`. Comando nuevo `/horario` e intención nueva `query_subject` («¿cuándo hay natación?»).
+- **Acepta cuando:** mando la foto de la tabla del horario, el bot pregunta qué lunes empezó la Semana A, respondo «el martes 1 de septiembre», y a partir de ahí `/manana` y `/horario` cuadran con la tabla. Un festivo entre semana cancela solo ese día sin correr la rotación. Con la agenda vacía pero horario cargado, la notificación de las 19:00 dice la clase en vez de pedir una foto.
 
 ### Fase 5 (opcional) — Integración con Home Assistant
 - Si la notificación por Telegram falla, disparar `POST {HA_URL}/api/services/notify/{HA_NOTIFY_SERVICE}` con `HA_TOKEN`. Solo si las variables están configuradas.

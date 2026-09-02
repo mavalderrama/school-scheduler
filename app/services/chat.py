@@ -19,6 +19,7 @@ from app.llm.provider import LLMError, LLMProviders
 from app.llm.schemas import ChatTurn, Intent
 from app.log import get_logger
 from app.services import cache
+from app.services import schedule as schedule_service
 from app.services.confirm import PendingEdit, PendingStore
 
 log = get_logger(__name__)
@@ -128,7 +129,7 @@ async def classify(
 # --- Despacho ------------------------------------------------------------------------------
 
 
-async def query_range(intent: Intent, today: date) -> ChatReply:
+async def query_range(intent: Intent, today: date, *, country: str = "CO") -> ChatReply:
     date_from = intent.date_from or today
     date_to = intent.date_to or date_from
     if date_to < date_from:
@@ -136,10 +137,15 @@ async def query_range(intent: Intent, today: date) -> ChatReply:
     entries = await repo.active_entries(date_from, date_to)
     if date_from == date_to:
         title = f"📚 <b>{compose.format_date_es(date_from)}</b>:"
-        empty = f"No tengo nada para el {compose.format_date_es(date_from)}."
-        # El título ya lleva el día; format_agenda lo repetiría.
-        body = "\n".join(compose.stored_line(e) for e in entries)
-        return ChatReply(text=f"{title}\n{body}" if entries else empty)
+        # Un solo día lleva también la clase del horario, que es lo que más se pregunta.
+        slot = await schedule_service.resolve(date_from, country=country)
+        lines = [title]
+        if slot is not None:
+            lines.append(compose.slot_line(slot))
+        lines.extend(compose.stored_line(e) for e in entries)
+        if len(lines) == 1:
+            return ChatReply(text=f"No tengo nada para el {compose.format_date_es(date_from)}.")
+        return ChatReply(text="\n".join(lines))
     return ChatReply(
         text=compose.format_agenda(
             entries,
@@ -211,11 +217,26 @@ async def prepare_remove(
     )
 
 
-async def dispatch(intent: Intent, *, today: date, store: PendingStore, chat_id: int) -> ChatReply:
+async def query_subject(intent: Intent, today: date, *, country: str = "CO") -> ChatReply:
+    """«¿cuándo hay natación?»: se calcula con el horario, sin tocar el LLM otra vez."""
+    subject = (intent.subject or intent.text or "").strip()
+    if not subject:
+        return ChatReply(text="¿De qué materia? Por ejemplo: «¿cuándo hay natación?».")
+    found = await schedule_service.find_subject(subject, today, country=country, count=3)
+    if not found and await repo.active_schedule(today) is None:
+        return ChatReply(text=compose.NO_SCHEDULE_TEXT)
+    return ChatReply(text=compose.format_next_occurrences(subject, found))
+
+
+async def dispatch(
+    intent: Intent, *, today: date, store: PendingStore, chat_id: int, country: str = "CO"
+) -> ChatReply:
     """Intención ya clasificada → respuesta. `confirm`/`reject`/`correct_pending` los
     resuelve el handler porque necesitan el estado pendiente y los proveedores."""
     if intent.action == "query_range":
-        return await query_range(intent, today)
+        return await query_range(intent, today, country=country)
+    if intent.action == "query_subject":
+        return await query_subject(intent, today, country=country)
     if intent.action == "add_entry":
         return await prepare_add(intent, today, store, chat_id)
     if intent.action == "remove_entry":

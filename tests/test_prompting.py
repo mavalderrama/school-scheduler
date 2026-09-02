@@ -35,7 +35,10 @@ def test_extraction_prompt_renders_context_last() -> None:
     assert TZ in prompt
     assert "La imagen viene adjunta." in prompt
     # Lo estático primero, el contexto volátil al final (preparado para prompt caching).
-    assert prompt.index("Reglas:") < prompt.index("=== CONTEXTO ===")
+    assert prompt.index("Reglas para") < prompt.index("=== CONTEXTO ===")
+    # Las dos formas de foto están descritas antes del contexto.
+    assert prompt.index('doc_type: "agenda"') < prompt.index("=== CONTEXTO ===")
+    assert prompt.index('doc_type: "schedule"') < prompt.index("=== CONTEXTO ===")
     assert prompt.rstrip().endswith("Responde únicamente con el JSON.")
 
 

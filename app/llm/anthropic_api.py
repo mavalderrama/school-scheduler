@@ -24,9 +24,21 @@ from anthropic import (
 
 from app.config import Settings
 from app.llm.json_out import validate_with_retry
-from app.llm.prompting import correction_prompt, extraction_prompt, intent_prompt
+from app.llm.prompting import (
+    correction_prompt,
+    extraction_prompt,
+    intent_prompt,
+    refine_prompt,
+)
 from app.llm.provider import LLMOutputError, LLMQuotaError, LLMUnavailableError
-from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, ProviderHealth
+from app.llm.schemas import (
+    ChatTurn,
+    ExtractionResult,
+    Intent,
+    LLMUsage,
+    ProviderHealth,
+    QAPair,
+)
 
 SYSTEM_PROMPT = (
     "Eres un componente de extracción de datos de un bot familiar. Devuelves el resultado "
@@ -123,6 +135,17 @@ class AnthropicAPIProvider:
         self, extraction: ExtractionResult, correction: str, today: date
     ) -> ExtractionResult:
         prompt = correction_prompt(extraction, correction, today, self._tz)
+        schema = ExtractionResult.model_json_schema()
+
+        async def call(hint: str | None) -> dict[str, Any]:
+            return await self._emit_json(prompt + (hint or ""), schema)
+
+        return await validate_with_retry(ExtractionResult, call, provider=self.name)
+
+    async def refine_extraction(
+        self, extraction: ExtractionResult, pairs: list[QAPair], today: date
+    ) -> ExtractionResult:
+        prompt = refine_prompt(extraction, pairs, today, self._tz)
         schema = ExtractionResult.model_json_schema()
 
         async def call(hint: str | None) -> dict[str, Any]:

@@ -51,6 +51,22 @@ class LLMTask(models.TextChoices):
     VISION = "vision", "Visión"
     INTENT = "intent", "Intención"
     CORRECTION = "correction", "Corrección"
+    REFINE = "refine", "Refinado con respuestas"
+
+
+class HolidayPolicy(models.TextChoices):
+    """Qué le hace un día no lectivo a la rotación."""
+
+    SKIP_DAY = "skip_day", "Solo se cancela ese día"
+    SHIFT = "shift", "La rotación se corre"
+
+
+class CalendarKind(models.TextChoices):
+    """Excepciones del calendario que la librería de festivos no puede saber."""
+
+    HOLIDAY = "holiday", "Festivo"
+    SCHOOL_CLOSED = "school_closed", "Sin clase"
+    CLASS_DAY = "class_day", "Sí hay clase"
 
 
 class User(models.Model):
@@ -279,3 +295,131 @@ class LLMCacheEntry(models.Model):
 
     def __str__(self) -> str:
         return f"{self.task}/{self.provider} ({self.hits} aciertos)"
+
+
+class ScheduleTemplate(models.Model):
+    """Horario rotativo: un ciclo de N semanas etiquetadas (A, B, ...) desde un lunes ancla.
+
+    Se versiona como todo lo demás: una foto nueva del horario desactiva la plantilla
+    anterior con `superseded_by` en vez de editarla.
+    """
+
+    name = models.TextField(verbose_name="nombre")
+    anchor_monday = models.DateField(
+        verbose_name="lunes ancla",
+        help_text="Lunes de la primera semana del ciclo (la etiquetada con week_index 0).",
+    )
+    cycle_weeks = models.SmallIntegerField(
+        default=2, db_default=2, verbose_name="semanas del ciclo"
+    )
+    valid_from = models.DateField(verbose_name="vigente desde")
+    valid_to = models.DateField(null=True, blank=True, verbose_name="vigente hasta")
+    holiday_policy = models.TextField(
+        choices=HolidayPolicy,
+        default=HolidayPolicy.SKIP_DAY,
+        db_default=HolidayPolicy.SKIP_DAY,
+        verbose_name="política de festivos",
+    )
+    source = models.ForeignKey(
+        Source,
+        on_delete=models.PROTECT,
+        db_column="source_id",
+        related_name="schedules",
+        verbose_name="fuente",
+    )
+    is_active = models.BooleanField(default=True, db_default=True, verbose_name="vigente")
+    superseded_by = models.ForeignKey(
+        Source,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        db_column="superseded_by",
+        related_name="superseded_schedules",
+        verbose_name="reemplazada por",
+    )
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+
+    class Meta:
+        db_table = "schedules"
+        verbose_name = "horario"
+        verbose_name_plural = "horarios"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(holiday_policy__in=HolidayPolicy.values),
+                name="schedules_holiday_policy_check",
+            ),
+            models.CheckConstraint(condition=Q(cycle_weeks__gte=1), name="schedules_cycle_check"),
+        ]
+        indexes = [
+            models.Index(
+                fields=["valid_from"], condition=Q(is_active=True), name="schedule_active_idx"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} (desde {self.valid_from})"
+
+
+class ScheduleSlot(models.Model):
+    """Una franja del ciclo: semana + día de la semana -> materia."""
+
+    schedule = models.ForeignKey(
+        ScheduleTemplate,
+        on_delete=models.PROTECT,
+        db_column="schedule_id",
+        related_name="slots",
+        verbose_name="horario",
+    )
+    week_index = models.SmallIntegerField(verbose_name="semana del ciclo (0 = la primera)")
+    week_label = models.TextField(verbose_name="etiqueta de la semana")
+    weekday = models.SmallIntegerField(verbose_name="día (ISO: 1 lunes ... 7 domingo)")
+    # TEXT y no entero: en este colegio la última franja se llama «Cultural».
+    rotation = models.TextField(null=True, blank=True, verbose_name="rotación")
+    subject = models.TextField(verbose_name="materia")
+    note = models.TextField(null=True, blank=True, verbose_name="nota")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+
+    class Meta:
+        db_table = "schedule_slots"
+        verbose_name = "franja del horario"
+        verbose_name_plural = "franjas del horario"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["schedule", "week_index", "weekday"], name="schedule_slot_unique"
+            ),
+            models.CheckConstraint(
+                condition=Q(weekday__gte=1) & Q(weekday__lte=7), name="schedule_slot_weekday_check"
+            ),
+            models.CheckConstraint(
+                condition=Q(week_index__gte=0), name="schedule_slot_week_index_check"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Semana {self.week_label} día {self.weekday}: {self.subject}"
+
+
+class CalendarException(models.Model):
+    """Días que la librería de festivos no puede saber: receso, jornadas pedagógicas.
+
+    `class_day` es la excepción a la excepción: un festivo nacional en el que el colegio
+    sí tiene clase.
+    """
+
+    day = models.DateField(unique=True, verbose_name="día")
+    kind = models.TextField(choices=CalendarKind, verbose_name="tipo")
+    label = models.TextField(verbose_name="motivo")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
+
+    class Meta:
+        db_table = "calendar_exceptions"
+        verbose_name = "excepción del calendario"
+        verbose_name_plural = "excepciones del calendario"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(kind__in=CalendarKind.values), name="calendar_exceptions_kind_check"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.day} {self.kind}: {self.label}"

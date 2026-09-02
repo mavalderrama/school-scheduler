@@ -21,6 +21,8 @@ from app.db.models import (
     EntryKind,
     NotificationKind,
     NotificationLog,
+    ScheduleSlot,
+    ScheduleTemplate,
     Source,
     SourceKind,
     SourceStatus,
@@ -126,3 +128,39 @@ async def test_connection_helpers_are_callable_from_the_loop() -> None:
     await repo.close_old()
     await repo.close_all()
     await repo.check_connection()
+
+
+async def test_schedule_tables_and_constraints_exist() -> None:
+    schedules = await repo.table_constraints("schedules")
+    assert "schedules_holiday_policy_check" in schedules
+    assert "schedules_cycle_check" in schedules
+
+    slots = await repo.table_constraints("schedule_slots")
+    assert slots["schedule_slot_unique"]["unique"] is True
+    assert slots["schedule_slot_unique"]["columns"] == ["schedule_id", "week_index", "weekday"]
+    assert "schedule_slot_weekday_check" in slots
+
+    exceptions = await repo.table_constraints("calendar_exceptions")
+    assert "calendar_exceptions_kind_check" in exceptions
+
+
+async def test_a_slot_cannot_repeat_a_weekday_within_a_week() -> None:
+    """El unique protege el cálculo: dos materias el mismo día del ciclo sería ambiguo."""
+    source = await Source.objects.acreate(kind=SourceKind.PHOTO)
+    template = await ScheduleTemplate.objects.acreate(
+        name="H", anchor_monday=date(2026, 8, 31), valid_from=date(2026, 8, 31), source=source
+    )
+    await ScheduleSlot.objects.acreate(
+        schedule=template, week_index=0, week_label="A", weekday=1, subject="Artes"
+    )
+    with pytest.raises(IntegrityError):
+        await ScheduleSlot.objects.acreate(
+            schedule=template, week_index=0, week_label="A", weekday=1, subject="Otra"
+        )
+
+
+async def test_a_calendar_exception_is_unique_per_day() -> None:
+    await repo.add_calendar_exception(date(2026, 10, 5), "school_closed", "Semana de receso")
+    await repo.add_calendar_exception(date(2026, 10, 5), "school_closed", "Receso (corregido)")
+    exceptions = await repo.calendar_exceptions()
+    assert exceptions[date(2026, 10, 5)] == ("school_closed", "Receso (corregido)")

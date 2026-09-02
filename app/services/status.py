@@ -18,6 +18,8 @@ from app.config import Settings
 from app.db import repo
 from app.llm.compose import format_date_es
 from app.llm.provider import LLMProviders
+from app.services import schedule as schedule_service
+from app.services import schoolcal
 
 TOKEN_LIFETIME_DAYS = 365
 TOKEN_WARN_DAYS = 30
@@ -81,6 +83,28 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
             if not call.ok and call.error:
                 detail += f" — {html.escape(call.error[:80])}"
             lines.append(detail)
+
+    # Horario rotativo: es lo primero que se mira cuando algo no cuadra por la mañana.
+    if settings.schedule_enabled:
+        lines.append("")
+        loaded = await schedule_service.load(today)
+        if loaded is None:
+            lines.append("🗓️ Sin horario cargado.")
+        else:
+            index = schedule_service.week_index(today, loaded.template)
+            label = next((s.week_label for s in loaded.slots if s.week_index == index), "?")
+            lines.append(
+                f"🗓️ Horario: <b>{html.escape(loaded.template.name)}</b> "
+                f"({len(loaded.slots)} franjas). Esta semana es la <b>Semana {label}</b>."
+            )
+            free = schoolcal.next_non_school_day(
+                today, exceptions=loaded.exceptions, country=settings.school_country
+            )
+            if free is not None:
+                lines.append(
+                    f"   Próximo día sin clase: {format_date_es(free.day)}"
+                    f" ({html.escape(free.reason or '')})."
+                )
 
     # Notificaciones.
     lines.append("")

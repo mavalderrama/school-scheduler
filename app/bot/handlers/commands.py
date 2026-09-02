@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
@@ -13,9 +13,17 @@ from app.db import repo
 from app.llm import compose
 from app.llm.provider import LLMProviders
 from app.services import chat, notify, status
-from app.services.confirm import PendingEdit, PendingPhoto, PendingStore
+from app.services import schedule as schedule_service
+from app.services.confirm import PendingEdit, PendingPhoto, PendingQuestions, PendingStore
 
 router = Router(name="commands")
+
+
+async def _slot(day: date, settings: Settings) -> schedule_service.SlotResult | None:
+    """La clase del día, o None si el horario está apagado o no hay ninguno cargado."""
+    if not settings.schedule_enabled:
+        return None
+    return await schedule_service.resolve(day, country=settings.school_country)
 
 
 @router.message(CommandStart())
@@ -37,13 +45,14 @@ async def cmd_ping(message: Message) -> None:
 async def cmd_hoy(message: Message, settings: Settings) -> None:
     today = datetime.now(settings.zoneinfo).date()
     entries = await repo.active_entries(today, today)
-    await message.answer(
-        compose.format_agenda(
-            entries,
-            title=f"📚 Hoy, {compose.format_date_es(today)}:",
-            empty=f"No tengo nada para hoy ({compose.format_date_es(today)}).",
-        )
-    )
+    slot = await _slot(today, settings)
+    lines = [f"📚 Hoy, {compose.format_date_es(today)}:"]
+    if slot is not None:
+        lines.append(compose.slot_line(slot))
+    lines.extend(compose.stored_line(e) for e in entries)
+    if len(lines) == 1:
+        lines.append("No tengo nada apuntado.")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("manana"))
@@ -53,7 +62,11 @@ async def cmd_manana(message: Message, settings: Settings) -> None:
     if settings.skip_weekend and tomorrow.weekday() >= 5:
         await message.answer(f"Mañana es {compose.format_date_es(tomorrow)}: no hay colegio. 🎉")
         return
-    _, text = await notify.build_daily_message(tomorrow)
+    _, text = await notify.build_daily_message(
+        tomorrow,
+        country=settings.school_country,
+        use_schedule=settings.schedule_enabled,
+    )
     await message.answer(text)
 
 
@@ -62,15 +75,41 @@ async def cmd_semana(message: Message, settings: Settings) -> None:
     today = datetime.now(settings.zoneinfo).date()
     date_from, date_to = chat.week_range(today)
     entries = await repo.active_entries(date_from, date_to)
+    agenda_text = compose.format_agenda(
+        entries,
+        title="📚 Esta semana:",
+        empty=(
+            f"No tengo nada apuntado entre el {compose.format_date_es(date_from)} y el "
+            f"{compose.format_date_es(date_to)}."
+        ),
+    )
+    if not settings.schedule_enabled:
+        await message.answer(agenda_text)
+        return
+    monday = date_from - timedelta(days=date_from.weekday())
+    plan = await schedule_service.resolve_week(monday, country=settings.school_country)
+    if not plan:
+        await message.answer(agenda_text)
+        return
+    label = next((s.week_label for s in plan if s.week_label), None)
+    header = f"🗓️ <b>Semana {label}</b>" if label else "🗓️ <b>Esta semana</b>"
+    lines = [header]
+    lines.extend(compose.slot_line(s, with_date=True) for s in plan)
+    await message.answer("\n".join(lines) + "\n\n" + agenda_text)
+
+
+@router.message(Command("horario"))
+async def cmd_horario(message: Message, settings: Settings) -> None:
+    """La tabla completa del horario rotativo y en qué semana estamos. Sin LLM."""
+    today = datetime.now(settings.zoneinfo).date()
+    loaded = await schedule_service.load(today)
+    if loaded is None:
+        await message.answer(compose.NO_SCHEDULE_TEXT)
+        return
+    index = schedule_service.week_index(today, loaded.template)
+    current = next((s.week_label for s in loaded.slots if s.week_index == index), None)
     await message.answer(
-        compose.format_agenda(
-            entries,
-            title="📚 Esta semana:",
-            empty=(
-                f"No tengo nada entre el {compose.format_date_es(date_from)} y el "
-                f"{compose.format_date_es(date_to)}."
-            ),
-        )
+        compose.format_schedule_table(loaded.template.name, loaded.slots, current_label=current)
     )
 
 
@@ -86,6 +125,12 @@ async def cmd_pendiente(message: Message, pending: PendingStore) -> None:
         await message.answer(
             "📷 Hay una foto pendiente de confirmar:\n\n"
             + compose.format_extraction(current.extraction)
+        )
+        return
+    if isinstance(current, PendingQuestions):
+        await message.answer(
+            "❓ Te hice una pregunta y sigo esperando la respuesta:\n\n"
+            + compose.format_question(current.current or "", remaining=0)
         )
         return
     if isinstance(current, PendingEdit) and current.action == "add":

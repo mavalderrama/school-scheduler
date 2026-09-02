@@ -38,7 +38,7 @@ async def on_source_action(
         return
 
     if callback_data.action == "confirm":
-        summary = await actions.confirm_photo(current)
+        summary = await actions.confirm_photo(current, settings)
         await query.answer("Guardado")
         await message.edit_text(
             compose.format_extraction(current.extraction).rsplit("\n", 1)[0] + "\n\n" + summary

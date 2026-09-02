@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.llm.prompts import load_prompt
-from app.llm.schemas import ChatTurn, ExtractionResult
+from app.llm.schemas import ChatTurn, ExtractionResult, QAPair
 
 WEEKDAYS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -31,6 +31,21 @@ def correction_prompt(extraction: ExtractionResult, correction: str, today: date
         tz=tz,
         extraction_json=extraction.model_dump_json(indent=2),
         correction=correction.strip(),
+    )
+
+
+def format_qa(pairs: list[QAPair]) -> str:
+    """Preguntas y respuestas del interrogatorio, en el orden en que ocurrieron."""
+    return "\n".join(f"P: {pair.question.strip()}\nR: {pair.answer.strip()}" for pair in pairs)
+
+
+def refine_prompt(extraction: ExtractionResult, pairs: list[QAPair], today: date, tz: str) -> str:
+    return load_prompt("refine_extraction").format(
+        today=today.isoformat(),
+        weekday=weekday_es(today),
+        tz=tz,
+        extraction_json=extraction.model_dump_json(indent=2),
+        qa_block=format_qa(pairs),
     )
 
 

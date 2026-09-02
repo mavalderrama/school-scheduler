@@ -20,16 +20,65 @@ class ExtractedEntry(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
-class ExtractionResult(BaseModel):
-    """Resultado de `extract_from_image`."""
+WEEKDAY_LABELS = {1: "lunes", 2: "martes", 3: "miércoles", 4: "jueves", 5: "viernes"}
 
-    entries: list[ExtractedEntry]
+
+class SlotDraft(BaseModel):
+    """Una fila de la tabla de un horario rotativo."""
+
+    week_label: str = Field(description="Etiqueta de la semana tal cual aparece: 'A', 'B'")
+    weekday: int = Field(ge=1, le=7, description="ISO: 1 lunes ... 5 viernes")
+    rotation: str | None = Field(
+        default=None, description="Número o nombre de la rotación; puede no ser numérico"
+    )
+    subject: str = Field(description="Materia o actividad")
+
+
+class ScheduleDraft(BaseModel):
+    """Horario rotativo leído de una foto, antes de resolver lo que falta.
+
+    `anchor_monday` casi nunca está en la imagen: es lo que el bot pregunta después.
+    """
+
+    name: str | None = Field(default=None, description="Título del horario si aparece")
+    cycle_weeks: int = Field(default=2, ge=1, le=8, description="Semanas distintas del ciclo")
+    slots: list[SlotDraft] = Field(default_factory=list)
+    anchor_monday: date | None = Field(
+        default=None, description="Lunes en que empezó la primera semana del ciclo"
+    )
+
+
+DocType = Literal["agenda", "schedule"]
+
+
+class ExtractionResult(BaseModel):
+    """Resultado de `extract_from_image`.
+
+    `doc_type` decide qué se guarda: entradas por fecha o un horario rotativo. Tiene
+    default para que el contrato de la Fase 1 siga valiendo tal cual.
+    """
+
+    entries: list[ExtractedEntry] = Field(default_factory=list)
     doubts: list[str] = Field(description="Lo que no se pudo leer o es ambiguo")
     detected_language: str
+    doc_type: DocType = "agenda"
+    schedule: ScheduleDraft | None = None
+    questions: list[str] = Field(
+        default_factory=list,
+        description="Preguntas concretas que harían falta para poder guardar esto",
+    )
+
+
+class QAPair(BaseModel):
+    """Una pregunta del bot y la respuesta del usuario, para `refine_extraction`."""
+
+    question: str
+    answer: str
 
 
 IntentAction = Literal[
     "query_range",
+    "query_subject",
     "add_entry",
     "remove_entry",
     "confirm",
@@ -50,6 +99,9 @@ class Intent(BaseModel):
     text: str | None = None
     target_entry_hint: str | None = Field(
         default=None, description="Para remove: 'lo del jueves', 'el disfraz'"
+    )
+    subject: str | None = Field(
+        default=None, description="Para query_subject: la materia por la que preguntan"
     )
 
 

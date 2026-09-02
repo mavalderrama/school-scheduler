@@ -7,12 +7,13 @@ aquí y tanto `handlers/callbacks.py` como `handlers/text.py` la llaman.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot
 
 from app.bot.handlers.photo import start_ingest
-from app.bot.keyboards import confirmation_keyboard
+from app.bot.present import present_extraction
 from app.config import Settings
 from app.db import repo
 from app.db.models import Source, SourceStatus
@@ -39,8 +40,14 @@ async def continue_queue(
         await start_ingest(bot, chat_id, next_photo, settings, providers, pending)
 
 
-async def confirm_photo(current: PendingPhoto) -> str:
-    result = await agenda.apply_source(current.source_id, current.extraction)
+async def confirm_photo(current: PendingPhoto, settings: Settings) -> str:
+    today = datetime.now(settings.zoneinfo).date()
+    result = await agenda.apply_source(current.source_id, current.extraction, today=today)
+    draft = current.extraction.schedule
+    if result.schedule_id is not None and draft is not None and draft.anchor_monday is not None:
+        return compose.format_schedule_applied(
+            draft.name or "Horario", result.slots, draft.anchor_monday
+        )
     return compose.format_applied(result.dates, result.inserted, result.superseded)
 
 
@@ -101,18 +108,6 @@ async def resume_photo(
         return False
 
     await bot.send_message(source.chat_id, "⏳ Ya pude leer la foto que quedó pendiente:")
-    summary = await bot.send_message(
-        source.chat_id,
-        compose.format_extraction(extraction),
-        reply_markup=confirmation_keyboard(source.pk),
-    )
-    pending.set(
-        PendingPhoto(
-            source_id=source.pk,
-            chat_id=source.chat_id,
-            extraction=extraction,
-            summary_message_id=summary.message_id,
-        )
-    )
+    await present_extraction(bot, source.chat_id, source.pk, extraction, pending)
     log.info("retry_photo_ok", source_id=source.pk, chat_id=source.chat_id)
     return True

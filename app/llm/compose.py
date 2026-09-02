@@ -5,10 +5,16 @@ from __future__ import annotations
 import html
 from collections.abc import Iterable, Sequence
 from datetime import date
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.llm.prompting import weekday_es
-from app.llm.schemas import ExtractedEntry, ExtractionResult
+from app.llm.schemas import (
+    WEEKDAY_LABELS,
+    ExtractedEntry,
+    ExtractionResult,
+    ScheduleDraft,
+    SlotDraft,
+)
 
 MONTHS_ES = [
     "enero",
@@ -52,8 +58,74 @@ def _group_by_date(entries: Iterable[ExtractedEntry]) -> dict[date, list[Extract
     return grouped
 
 
+class SlotLike(Protocol):
+    """Lo mínimo que compose necesita de una franja resuelta del horario.
+
+    Son propiedades y no atributos porque `SlotResult` es un dataclass congelado: un
+    Protocol con atributos exigiría que fueran asignables.
+    """
+
+    @property
+    def day(self) -> date: ...
+
+    @property
+    def week_label(self) -> str | None: ...
+
+    @property
+    def rotation(self) -> str | None: ...
+
+    @property
+    def subject(self) -> str | None: ...
+
+    @property
+    def skipped_reason(self) -> str | None: ...
+
+
+def slot_line(slot: SlotLike, *, with_date: bool = False) -> str:
+    """Una línea de clase. Sin materia se explica por qué, en vez de callar."""
+    prefix = f"{format_date_es(slot.day)}: " if with_date else ""
+    if slot.subject is None:
+        reason = f" ({html.escape(slot.skipped_reason)})" if slot.skipped_reason else ""
+        return f"🚫 {prefix}sin clase{reason}"
+    week = f" · Semana {html.escape(slot.week_label)}" if slot.week_label else ""
+    rotation = f" · rot. {html.escape(slot.rotation)}" if slot.rotation else ""
+    return f"🎨 {prefix}<b>{html.escape(slot.subject)}</b>{week}{rotation}"
+
+
+def format_schedule_draft(draft: ScheduleDraft) -> str:
+    """Resumen de un horario recién leído de una foto, para confirmarlo."""
+    lines = [f"🗓️ Entendí un <b>horario rotativo</b>: {html.escape(draft.name or 'sin título')}"]
+    lines.append(f"Ciclo de {draft.cycle_weeks} semanas, {len(draft.slots)} franjas.")
+    by_week: dict[str, list[SlotDraft]] = {}
+    for slot in sorted(draft.slots, key=lambda s: (s.week_label, s.weekday)):
+        by_week.setdefault(slot.week_label, []).append(slot)
+    for label, slots in by_week.items():
+        lines.append("")
+        lines.append(f"<b>Semana {html.escape(label)}</b>")
+        for slot in slots:
+            day = WEEKDAY_LABELS.get(slot.weekday, str(slot.weekday))
+            rotation = f" ({html.escape(slot.rotation)})" if slot.rotation else ""
+            lines.append(f"• {day}: {html.escape(slot.subject)}{rotation}")
+    if draft.anchor_monday is not None:
+        lines.append("")
+        lines.append(
+            f"La Semana {next(iter(by_week), 'A')} empezó el {format_date_es(draft.anchor_monday)}."
+        )
+    return "\n".join(lines)
+
+
 def format_extraction(extraction: ExtractionResult) -> str:
     """Resumen de lo leído, agrupado por día, con dudas y marcas de confianza."""
+    if extraction.doc_type == "schedule" and extraction.schedule is not None:
+        parts = [format_schedule_draft(extraction.schedule)]
+        if extraction.doubts:
+            parts.append("")
+            parts.append("⚠️ Dudas:")
+            parts.extend(f"• {html.escape(d)}" for d in extraction.doubts)
+        parts.append("")
+        parts.append("¿Lo guardo?")
+        return "\n".join(parts)
+
     lines: list[str] = []
     if extraction.entries:
         lines.append("📖 Esto es lo que entendí:")
@@ -147,9 +219,82 @@ HELP_TEXT = (
     "• «agrega que el martes lleva disfraz»\n"
     "• «quita lo del jueves»\n"
     "\n"
+    "• «¿cuándo hay natación?»\n"
+    "\n"
+    "Si me mandas la <b>tabla del horario</b> (Semana A / Semana B), te pregunto cuándo "
+    "empezó el ciclo y a partir de ahí te digo qué clase toca cada día.\n"
+    "\n"
     "Comandos (funcionan aunque la IA esté caída):\n"
-    "/hoy · /manana · /semana · /pendiente · /estado · /ayuda · /ping"
+    "/hoy · /manana · /semana · /horario · /pendiente · /estado · /ayuda · /ping"
 )
+
+
+NO_SCHEDULE_TEXT = (
+    "Todavía no tengo el horario cargado. Mándame una foto de la tabla "
+    "(Semana A / Semana B) y te pregunto lo que falte."
+)
+
+
+def format_schedule_table(
+    template_name: str,
+    slots: Sequence[Any],
+    *,
+    current_label: str | None = None,
+) -> str:
+    """La tabla completa del horario para /horario. `slots` son filas de ScheduleSlot."""
+    lines = [f"🗓️ <b>{html.escape(template_name)}</b>"]
+    if current_label:
+        lines.append(f"Esta semana es la <b>Semana {html.escape(current_label)}</b>.")
+    by_week: dict[str, list[Any]] = {}
+    for slot in slots:
+        by_week.setdefault(slot.week_label, []).append(slot)
+    for label, week_slots in by_week.items():
+        lines.append("")
+        marker = " ← esta semana" if label == current_label else ""
+        lines.append(f"<b>Semana {html.escape(label)}</b>{marker}")
+        for slot in sorted(week_slots, key=lambda s: s.weekday):
+            day = WEEKDAY_LABELS.get(slot.weekday, str(slot.weekday))
+            rotation = f" ({html.escape(slot.rotation)})" if slot.rotation else ""
+            lines.append(f"• {day}: {html.escape(slot.subject)}{rotation}")
+    return "\n".join(lines)
+
+
+def format_next_occurrences(subject: str, slots: Sequence[SlotLike]) -> str:
+    """Respuesta a «¿cuándo hay natación?»."""
+    if not slots:
+        return (
+            f"No encuentro «{html.escape(subject)}» en el horario. "
+            "Prueba con /horario para ver las materias que tengo."
+        )
+    name = slots[0].subject or subject
+    lines = [f"🎨 Próximas veces que hay <b>{html.escape(name)}</b>:"]
+    lines.extend(
+        f"• {format_date_es(s.day)}" + (f" · rot. {html.escape(s.rotation)}" if s.rotation else "")
+        for s in slots
+    )
+    return "\n".join(lines)
+
+
+def format_question(question: str, *, remaining: int) -> str:
+    """Una pregunta del interrogatorio, con cuántas quedan si hay más de una."""
+    tail = (
+        f"\n\n<i>({remaining} pregunta{'s' if remaining != 1 else ''} más)</i>" if remaining else ""
+    )
+    return f"❓ {html.escape(question)}{tail}"
+
+
+GIVE_UP_TEXT = (
+    "No consigo entender lo que falta. Descarto la foto con ❌ y la mandas de nuevo, "
+    "o me lo cuentas de otra forma."
+)
+
+
+def format_schedule_applied(name: str, slots: int, anchor: date) -> str:
+    return (
+        f"✅ Guardado el horario <b>{html.escape(name)}</b>: {slots} franjas. "
+        f"El ciclo empezó el {format_date_es(anchor)}."
+    )
+
 
 NO_LLM_TEXT = (
     "⚠️ No puedo interpretar texto ahora mismo (el proveedor de IA no responde). "

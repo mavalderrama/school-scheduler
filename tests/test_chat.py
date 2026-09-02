@@ -233,3 +233,110 @@ async def test_help_and_unknown() -> None:
         "No te entendí"
         in (await chat.dispatch(Intent(action="unknown"), today=MON, store=store, chat_id=1)).text
     )
+
+
+# --- Fase 6: consultas que usan el horario ---------------------------------------------------
+
+
+async def seed_schedule(anchor: date = date(2026, 8, 31)) -> None:
+    from app.llm.schemas import ScheduleDraft, SlotDraft
+
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=1)
+    await agenda.apply_source(
+        source.pk,
+        ExtractionResult(
+            entries=[],
+            doubts=[],
+            detected_language="es",
+            doc_type="schedule",
+            schedule=ScheduleDraft(
+                name="Horario K4A",
+                cycle_weeks=2,
+                anchor_monday=anchor,
+                slots=[
+                    SlotDraft(week_label="A", weekday=1, rotation="1", subject="Artes plásticas"),
+                    SlotDraft(week_label="B", weekday=4, rotation="9", subject="Natación"),
+                ],
+            ),
+        ),
+        today=anchor,
+    )
+
+
+async def test_query_subject_answers_when_a_class_happens() -> None:
+    await seed_schedule()
+    reply = await chat.dispatch(
+        Intent(action="query_subject", subject="natación"),
+        today=MON,
+        store=PendingStore(),
+        chat_id=1,
+    )
+    assert "Natación" in reply.text
+    assert "jueves 10 de septiembre" in reply.text
+    assert "rot. 9" in reply.text
+
+
+async def test_query_subject_ignores_accents() -> None:
+    await seed_schedule()
+    reply = await chat.dispatch(
+        Intent(action="query_subject", subject="NATACION"),
+        today=MON,
+        store=PendingStore(),
+        chat_id=1,
+    )
+    assert "Natación" in reply.text
+
+
+async def test_query_subject_without_a_schedule_says_so() -> None:
+    reply = await chat.dispatch(
+        Intent(action="query_subject", subject="natación"),
+        today=MON,
+        store=PendingStore(),
+        chat_id=1,
+    )
+    assert "no tengo el horario" in reply.text.lower()
+
+
+async def test_query_subject_for_something_not_in_the_schedule() -> None:
+    await seed_schedule()
+    reply = await chat.dispatch(
+        Intent(action="query_subject", subject="ajedrez"),
+        today=MON,
+        store=PendingStore(),
+        chat_id=1,
+    )
+    assert "No encuentro" in reply.text and "/horario" in reply.text
+
+
+async def test_query_subject_without_a_subject_asks_for_one() -> None:
+    reply = await chat.dispatch(
+        Intent(action="query_subject"), today=MON, store=PendingStore(), chat_id=1
+    )
+    assert "¿De qué materia?" in reply.text
+
+
+async def test_a_single_day_query_includes_the_class() -> None:
+    """«¿qué hay el jueves?» tiene que decir también qué clase toca."""
+    await seed_schedule()
+    await seed((date(2026, 9, 10), "bring", "gorro de piscina"))
+    reply = await chat.dispatch(
+        Intent(action="query_range", date_from=date(2026, 9, 10), date_to=date(2026, 9, 10)),
+        today=MON,
+        store=PendingStore(),
+        chat_id=1,
+    )
+    assert "Natación" in reply.text
+    assert "gorro de piscina" in reply.text
+    assert reply.text.index("Natación") < reply.text.index("gorro")
+
+
+async def test_a_day_with_only_a_class_is_not_empty() -> None:
+    await seed_schedule()
+    reply = await chat.dispatch(
+        Intent(action="query_range", date_from=date(2026, 9, 10), date_to=date(2026, 9, 10)),
+        today=MON,
+        store=PendingStore(),
+        chat_id=1,
+    )
+    assert "Natación" in reply.text
+    assert "No tengo nada" not in reply.text

@@ -18,14 +18,17 @@ El diseño completo está en `docs/PLAN.md`; las instrucciones operativas en `CL
 ## Uso
 
 Manda una **foto** de la agenda y el bot muestra lo que entendió antes de guardar nada
-(✅ Confirmar / ✏️ Corregir / ❌ Descartar). También entiende texto:
+(✅ Confirmar / ✏️ Corregir / ❌ Descartar). Si le falta un dato imprescindible, **pregunta
+antes de guardar** en vez de adivinar. También reconoce la **tabla del horario** (Semana A /
+Semana B) y a partir de ella calcula qué clase toca cada día. También entiende texto:
 
 - «¿qué hay mañana?», «¿qué lleva el viernes?», «¿qué hay esta semana?»
+- «¿cuándo hay natación?»
 - «agrega que el martes lleva disfraz» · «quita lo del jueves» (ambas piden confirmación)
 
-Comandos, que funcionan aunque la IA esté caída: `/hoy` `/manana` `/semana` `/pendiente`
-`/ayuda` `/ping`. Cada tarde a las 19:00 avisa lo de mañana; los domingos, los días de la
-próxima semana sin agenda.
+Comandos, que funcionan aunque la IA esté caída: `/hoy` `/manana` `/semana` `/horario`
+`/pendiente` `/estado` `/ayuda` `/ping`. Cada tarde a las 19:00 avisa lo de mañana (con la
+clase del horario); los domingos, los días de la próxima semana sin agenda.
 
 ## Cambiar de proveedor de LLM
 
@@ -76,6 +79,30 @@ Guarda en `data/backups/` y rota a 14 días. Restaurar:
 gunzip -c data/backups/agenda-YYYYmmdd-HHMM.sql.gz | \
   docker compose exec -T postgres psql -U agenda -d agenda
 ```
+
+### Cargar el horario rotativo
+
+1. Mandar al bot una foto de la tabla del horario (Semana A / Semana B).
+2. El bot pregunta **qué lunes empezó la Semana A**. Vale responder con cualquier día de
+   esa semana («el martes 1 de septiembre»): él saca el lunes.
+3. Confirmar con ✅. A partir de ahí `/horario`, `/hoy`, `/manana`, `/semana` y la
+   notificación de las 19:00 dicen qué clase toca.
+
+Una foto nueva del horario **reemplaza** a la anterior; la vieja se conserva desactivada.
+
+### Días sin clase
+
+Los festivos nacionales de Colombia salen solos de la librería `holidays`, incluidos los
+que se corren al lunes. Lo que solo sabe el colegio —semana de receso, jornadas
+pedagógicas, día de la familia— se carga a mano en el admin, en **excepciones del
+calendario**:
+
+- `school_closed`: no hay clase ese día.
+- `class_day`: sí hay clase, aunque sea festivo nacional.
+
+Un festivo **solo cancela ese día**: la semana sigue siendo la A o la B que le toca por
+calendario, y esa rotación se pierde esa vuelta. Si no se cargan los días sin clase, el
+bot anunciará clases en días en los que no hay colegio.
 
 ### Agregar un usuario
 

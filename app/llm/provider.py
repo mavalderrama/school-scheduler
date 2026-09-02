@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from app.config import ProviderName, Settings
-from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, ProviderHealth
+from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, ProviderHealth, QAPair
 from app.log import get_logger
 
 log = get_logger(__name__)
@@ -59,6 +59,10 @@ class LLMProvider(Protocol):
 
     async def correct_extraction(
         self, extraction: ExtractionResult, correction: str, today: date
+    ) -> ExtractionResult: ...
+
+    async def refine_extraction(
+        self, extraction: ExtractionResult, pairs: list[QAPair], today: date
     ) -> ExtractionResult: ...
 
     async def classify_intent(
@@ -213,6 +217,12 @@ class FallbackProvider:
         self, extraction: ExtractionResult, correction: str, today: date
     ) -> ExtractionResult:
         run = await self.run(lambda p: p.correct_extraction(extraction, correction, today))
+        return run.value
+
+    async def refine_extraction(
+        self, extraction: ExtractionResult, pairs: list[QAPair], today: date
+    ) -> ExtractionResult:
+        run = await self.run(lambda p: p.refine_extraction(extraction, pairs, today))
         return run.value
 
     async def classify_intent(

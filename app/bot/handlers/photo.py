@@ -7,13 +7,12 @@ from pathlib import Path
 from aiogram import Bot, F, Router
 from aiogram.types import Message
 
-from app.bot.keyboards import confirmation_keyboard
+from app.bot.present import present_extraction
 from app.config import Settings
-from app.llm.compose import format_extraction
 from app.llm.provider import LLMProviders
 from app.log import get_logger
 from app.services import ingest
-from app.services.confirm import PendingPhoto, PendingStore, QueuedPhoto
+from app.services.confirm import PendingStore, QueuedPhoto
 
 log = get_logger(__name__)
 router = Router(name="photo")
@@ -49,16 +48,9 @@ async def start_ingest(
     except ingest.IngestError as exc:
         await status.edit_text(f"⚠️ {exc.user_message}")
         return
-    summary = await status.edit_text(
-        format_extraction(result.extraction), reply_markup=confirmation_keyboard(result.source_id)
-    )
-    pending.set(
-        PendingPhoto(
-            source_id=result.source_id,
-            chat_id=chat_id,
-            extraction=result.extraction,
-            summary_message_id=summary.message_id if isinstance(summary, Message) else None,
-        )
+    # Decide entre preguntar lo que falta y pedir confirmación.
+    await present_extraction(
+        bot, chat_id, result.source_id, result.extraction, pending, edit_message=status
     )
 
 
