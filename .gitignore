@@ -10,3 +10,6 @@ __pycache__/
 dist/
 build/
 staticfiles/
+
+# MCP server config — holds API tokens, keep local
+.mcp.json
