@@ -16,7 +16,7 @@ from app.config import Settings
 from app.llm import compose
 from app.llm.provider import LLMProviders
 from app.log import get_logger
-from app.services.confirm import PendingEdit, PendingPhoto, PendingStore
+from app.services.confirm import PendingEdit, PendingPhoto, PendingQuestions, PendingStore
 
 log = get_logger(__name__)
 router = Router(name="callbacks")
@@ -37,9 +37,24 @@ async def on_source_action(
         return
     chat_id = message.chat.id
     current = pending.get(chat_id)
-    if not isinstance(current, PendingPhoto) or current.source_id != callback_data.source_id:
+    # ❌ vale también sobre un interrogatorio a medias: es el botón de salida mientras el
+    # bot pregunta. ✅ y ✏️ solo tienen sentido con una lectura ya completa.
+    if not isinstance(current, PendingPhoto | PendingQuestions):
         await query.answer("Esta lectura ya no está activa.")
         await message.edit_reply_markup(reply_markup=None)
+        return
+    if current.source_id != callback_data.source_id:
+        await query.answer("Esta lectura ya no está activa.")
+        await message.edit_reply_markup(reply_markup=None)
+        return
+
+    if isinstance(current, PendingQuestions):
+        if callback_data.action != "reject":
+            await query.answer("Primero respóndeme la pregunta, o descarta la foto.")
+            return
+        await query.answer("Descartado")
+        await message.edit_text(await actions.reject_photo(current))
+        await actions.continue_queue(bot, chat_id, settings, providers, pending)
         return
 
     if callback_data.action == "confirm":

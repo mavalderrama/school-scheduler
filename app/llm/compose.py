@@ -240,7 +240,7 @@ HELP_TEXT = (
     "empezó el ciclo y a partir de ahí te digo qué clase toca cada día.\n"
     "\n"
     "Comandos (funcionan aunque la IA esté caída):\n"
-    "/hoy · /manana · /semana · /horario · /pendiente · /estado · /ayuda · /ping"
+    "/hoy · /manana · /semana · /horario · /pendiente · /cancelar · /estado · /ayuda · /ping"
 )
 
 
@@ -300,11 +300,15 @@ def format_next_occurrences(subject: str, slots: Sequence[SlotLike]) -> str:
 
 
 def format_question(question: str, *, remaining: int) -> str:
-    """Una pregunta del interrogatorio, con cuántas quedan si hay más de una."""
+    """Una pregunta del interrogatorio, con cuántas quedan si hay más de una.
+
+    Siempre recuerda cómo salir: mientras el bot pregunta, todo lo que escribes cuenta
+    como respuesta, así que la salida tiene que estar a la vista.
+    """
     tail = (
-        f"\n\n<i>({remaining} pregunta{'s' if remaining != 1 else ''} más)</i>" if remaining else ""
+        f"\n<i>({remaining} pregunta{'s' if remaining != 1 else ''} más)</i>\n" if remaining else ""
     )
-    return f"❓ {html.escape(question)}{tail}"
+    return f"❓ {html.escape(question)}\n{tail}\n<i>Si prefieres dejarlo, dime «descarta».</i>"
 
 
 GIVE_UP_TEXT = (

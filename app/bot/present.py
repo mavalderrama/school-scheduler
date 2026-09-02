@@ -11,7 +11,7 @@ from __future__ import annotations
 from aiogram import Bot
 from aiogram.types import Message
 
-from app.bot.keyboards import confirmation_keyboard, schedule_keyboard
+from app.bot.keyboards import confirmation_keyboard, question_keyboard, schedule_keyboard
 from app.db import repo
 from app.llm import compose
 from app.llm.schemas import ExtractionResult
@@ -48,10 +48,11 @@ async def present_extraction(
         )
         pending.set(state)
         text = compose.format_question(questions[0], remaining=len(questions) - 1)
+        keyboard = question_keyboard(source_id)
         if edit_message is not None:
-            await edit_message.edit_text(text)
+            await edit_message.edit_text(text, reply_markup=keyboard)
         else:
-            await bot.send_message(chat_id, text)
+            await bot.send_message(chat_id, text, reply_markup=keyboard)
         log.info("questions_asked", source_id=source_id, count=len(questions))
         return
 

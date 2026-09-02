@@ -10,12 +10,15 @@ from datetime import date
 
 import pytest
 
+from app.bot import actions
 from app.config import Settings
 from app.db import repo
 from app.db.models import ScheduleTemplate, SourceKind, SourceStatus
+from app.llm import compose
 from app.llm.provider import LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ExtractionResult, QAPair, ScheduleDraft, SlotDraft
-from app.services import agenda, ingest, schedule
+from app.services import agenda, chat, ingest, schedule
+from app.services.confirm import PendingQuestions
 from tests.test_ingest import providers
 from tests.test_provider import FakeProvider
 
@@ -417,3 +420,66 @@ async def test_the_caption_survives_a_restart(settings: Settings) -> None:
     source = await repo.get_source(info.value.source_id)
     assert source is not None
     assert source.caption == "Debes marcar este como PAC horario extendido"
+
+
+# --- Salir del interrogatorio ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Descarta", "descártalo", "  CANCELA. ", "❌", "ya no", "no quiero", "Déjalo", "no sigas"],
+)
+def test_these_mean_leave_it(text: str) -> None:
+    assert chat.is_cancel(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "no",  # puede ser respuesta legítima a una pregunta de sí/no
+        "sí",
+        "31 de agosto",
+        "el martes 1 de septiembre",
+        "empezó el lunes pasado",
+    ],
+)
+def test_these_are_answers_not_a_cancellation(text: str) -> None:
+    assert not chat.is_cancel(text)
+
+
+async def test_cancelling_discards_without_saving_anything(settings: Settings) -> None:
+    """Lo que falló de verdad: escribir «descarta» se tomaba como respuesta a la pregunta."""
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    state = PendingQuestions(
+        source_id=source.pk,
+        chat_id=-100,
+        extraction=extraction(),
+        questions=["¿Qué lunes empezó la Semana A?"],
+    )
+    assert chat.is_cancel("Descarta")
+
+    text = await actions.reject_photo(state)
+    assert "descarto" in text.lower()
+    refreshed = await repo.get_source(source.pk)
+    assert refreshed is not None and refreshed.status == SourceStatus.REJECTED
+    assert await repo.active_schedules() == []
+
+
+def test_a_failed_refine_puts_the_question_back() -> None:
+    """Tras un fallo de la IA la pregunta vuelve a estar viva, no dada por contestada."""
+    state = PendingQuestions(
+        source_id=1,
+        chat_id=-100,
+        extraction=extraction(),
+        questions=["¿Qué lunes empezó la Semana A?"],
+    )
+    state.answer("el 31 de agosto")
+    assert state.complete  # ya no quedaría nada que preguntar
+    state.answers.pop()  # lo que hace el handler cuando el refinado falla
+    assert not state.complete
+    assert state.current == "¿Qué lunes empezó la Semana A?"
+
+
+def test_the_question_always_shows_the_way_out() -> None:
+    text = compose.format_question("¿Qué lunes empezó la Semana A?", remaining=0)
+    assert "descarta" in text.lower()

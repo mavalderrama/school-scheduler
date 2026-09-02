@@ -22,7 +22,7 @@ from app.llm import compose
 from app.llm.provider import LLMError, LLMProviders, LLMQuotaError
 from app.log import get_logger
 from app.services import agenda, ingest
-from app.services.confirm import PendingEdit, PendingPhoto, PendingStore
+from app.services.confirm import PendingEdit, PendingPhoto, PendingQuestions, PendingStore
 
 log = get_logger(__name__)
 
@@ -62,9 +62,10 @@ async def confirm_photo(
     return compose.format_applied(result.dates, result.inserted, result.superseded)
 
 
-async def reject_photo(current: PendingPhoto) -> str:
+async def reject_photo(current: PendingPhoto | PendingQuestions) -> str:
+    """Descartar vale tanto para una lectura pendiente como para un interrogatorio a medias."""
     await agenda.reject_source(current.source_id)
-    return "❌ Descartado. No guardé nada de esta foto."
+    return "❌ Listo, lo descarto. No guardé nada de esta foto; mándamela otra vez cuando quieras."
 
 
 async def apply_edit(edit: PendingEdit, user_id: int | None) -> str:

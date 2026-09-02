@@ -8,7 +8,12 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 
 from app.bot import actions
-from app.bot.keyboards import candidates_keyboard, confirmation_keyboard, edit_keyboard
+from app.bot.keyboards import (
+    candidates_keyboard,
+    confirmation_keyboard,
+    edit_keyboard,
+    question_keyboard,
+)
 from app.bot.present import present_extraction
 from app.config import Settings
 from app.db import repo
@@ -71,7 +76,17 @@ async def _answer_question(
     providers: LLMProviders,
     pending: PendingStore,
 ) -> None:
-    """Guarda la respuesta y, cuando están todas, reinterpreta la extracción con ellas."""
+    """Guarda la respuesta y, cuando están todas, reinterpreta la extracción con ellas.
+
+    Antes de nada mira si el usuario quiere dejarlo: durante el interrogatorio cualquier
+    texto se tomaba como respuesta y no había forma de salir. La comprobación es en Python,
+    sin LLM, para que funcione también con el proveedor caído.
+    """
+    if chat.is_cancel(text):
+        await _reply(message, current.chat_id, await actions.reject_photo(current))
+        await actions.continue_queue(bot, current.chat_id, settings, providers, pending)
+        return
+
     current.answer(text)
     if not current.complete:
         remaining = len(current.questions) - len(current.answers) - 1
@@ -85,9 +100,15 @@ async def _answer_question(
         )
     except LLMError as exc:
         log.warning("refine_failed", source_id=current.source_id, error=str(exc))
+        # Devolver la respuesta a la cola: si no, la pregunta se daba por contestada y el
+        # usuario se quedaba atrapado respondiendo algo que nunca se procesaba.
+        if current.answers:
+            current.answers.pop()
         await status.edit_text(
-            "⚠️ No pude procesar la respuesta ahora (el proveedor de IA no respondió). "
-            "Vuelve a mandarme la foto más tarde."
+            "⚠️ La IA no respondió, así que no pude procesarlo. Puedes contestarme otra vez "
+            "o dejarlo con el botón.\n\n"
+            + compose.format_question(current.current or "", remaining=0),
+            reply_markup=question_keyboard(current.source_id),
         )
         return
     # Otra ronda si sigue faltando algo; `attempts` acaba cortando el bucle.

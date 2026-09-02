@@ -138,3 +138,21 @@ def schedule_keyboard(source_id: int, existing: list[tuple[int, str]]) -> Inline
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def question_keyboard(source_id: int) -> InlineKeyboardMarkup:
+    """Salida siempre visible mientras el bot pregunta.
+
+    Sin esto la única forma de salir del interrogatorio era contestar, y cualquier texto
+    se tomaba como respuesta: quedarse atrapado respondiendo era el comportamiento normal.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Descartar la foto",
+                    callback_data=SourceCallback(action="reject", source_id=source_id).pack(),
+                )
+            ]
+        ]
+    )

@@ -27,6 +27,62 @@ log = get_logger(__name__)
 HISTORY_TURNS = 6
 MAX_CANDIDATES = 6
 
+CANCEL_WORDS = frozenset(
+    {
+        "descarta",
+        "descartar",
+        "descartalo",
+        "descartala",
+        "cancela",
+        "cancelar",
+        "cancelalo",
+        "olvida",
+        "olvidalo",
+        "olvidate",
+        "dejalo",
+        "deja",
+        "anula",
+        "anular",
+        "borra",
+        "borralo",
+        "basta",
+        "para",
+        "stop",
+        "salir",
+        "abortar",
+        "nada",
+        "❌",
+        "no quiero",
+        "no sigas",
+        "no importa",
+        "ya no",
+        "mejor no",
+        "asi no",
+        "dejemoslo",
+        "no gracias",
+        "basta ya",
+        "ya basta",
+        "dejalo asi",
+    }
+)
+"""Formas de decir «déjalo» durante el interrogatorio.
+
+Se comprueban en Python, sin LLM: salir de una pregunta tiene que funcionar también
+cuando el proveedor está caído, que es justo cuando más ganas dan de salir. Un «no» a
+secas NO está en la lista: el modelo puede preguntar cosas de sí/no y ahí es una
+respuesta legítima, no una cancelación.
+"""
+
+
+def _strip_accents(text: str) -> str:
+    return text.translate(str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN"))
+
+
+def is_cancel(text: str) -> bool:
+    """¿El usuario está diciendo que lo deje, en vez de respondiendo la pregunta?"""
+    cleaned = _strip_accents(text).lower().strip().strip(".!¡¿?,;: ")
+    return " ".join(cleaned.split()) in CANCEL_WORDS
+
 
 @dataclass
 class ChatReply:

@@ -146,6 +146,30 @@ async def cmd_pendiente(message: Message, pending: PendingStore) -> None:
     await message.answer("✍️ Hay una baja pendiente de confirmar.")
 
 
+@router.message(Command("cancelar"))
+async def cmd_cancelar(
+    message: Message,
+    settings: Settings,
+    providers: LLMProviders,
+    pending: PendingStore,
+) -> None:
+    """Salida de emergencia sin LLM: descarta lo que haya pendiente en este chat."""
+    from app.bot import actions
+
+    chat_id = message.chat.id
+    current = pending.get(chat_id)
+    if current is None:
+        await message.answer("No hay nada pendiente que cancelar.")
+        return
+    if isinstance(current, PendingEdit):
+        pending.clear(chat_id)
+        await message.answer("Listo, no cambio nada.")
+        return
+    await message.answer(await actions.reject_photo(current))
+    if message.bot is not None:
+        await actions.continue_queue(message.bot, chat_id, settings, providers, pending)
+
+
 @router.message(Command("estado"))
 async def cmd_estado(message: Message, settings: Settings, providers: LLMProviders) -> None:
     """Informe de operación. `/estado check` además hace healthcheck real (gasta cuota)."""

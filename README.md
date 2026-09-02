@@ -27,7 +27,7 @@ Semana B) y a partir de ella calcula qué clase toca cada día. También entiend
 - «agrega que el martes lleva disfraz» · «quita lo del jueves» (ambas piden confirmación)
 
 Comandos, que funcionan aunque la IA esté caída: `/hoy` `/manana` `/semana` `/horario`
-`/pendiente` `/estado` `/ayuda` `/ping`. Cada tarde a las 19:00 avisa lo de mañana (con la
+`/pendiente` `/cancelar` `/estado` `/ayuda` `/ping`. Cada tarde a las 19:00 avisa lo de mañana (con la
 clase del horario); los domingos, los días de la próxima semana sin agenda.
 
 ## Cambiar de proveedor de LLM
@@ -84,7 +84,9 @@ gunzip -c data/backups/agenda-YYYYmmdd-HHMM.sql.gz | \
 
 1. Mandar al bot una foto de la tabla del horario (Semana A / Semana B).
 2. El bot pregunta **qué lunes empezó la Semana A**. Vale responder con cualquier día de
-   esa semana («el martes 1 de septiembre»): él saca el lunes.
+   esa semana («el martes 1 de septiembre»): él saca el lunes. Mientras pregunta, todo lo
+   que escribas cuenta como respuesta; para salir, pulsa ❌, escribe «descarta» o usa
+   `/cancelar`.
 3. Confirmar con ✅. A partir de ahí `/horario`, `/hoy`, `/manana`, `/semana` y la
    notificación de las 19:00 dicen qué clase toca.
 
