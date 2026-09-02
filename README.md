@@ -13,7 +13,7 @@ El diseño completo está en `docs/PLAN.md`; las instrucciones operativas en `CL
 2. `make dev` levanta Postgres y el bot, aplica migraciones y sigue los logs.
 3. `make check-llm` comprueba que el proveedor de LLM configurado responde.
 4. Escribir `/ping` al bot desde un chat en la whitelist: responde `pong`.
-5. Admin de Django en `http://<ip-del-lxc>:8000/admin/` (solo LAN), con el superusuario del `.env`.
+5. Admin de Django en `http://10.70.70.60:8000/admin/` (solo LAN), con el superusuario del `.env`.
 
 ## Uso
 
@@ -89,7 +89,7 @@ gunzip -c data/backups/agenda-YYYYmmdd-HHMM.sql.gz | \
 - `/estado` en Telegram: última notificación, últimas fuentes, consumo del mes por
   proveedor, fotos esperando cuota y vencimiento del token. `/estado check` además hace
   un healthcheck real (gasta una llamada).
-- `make logs`, y el admin en `http://<ip-del-lxc>:8000/admin/` para ver `sources`,
+- `make logs`, y el admin en `http://10.70.70.60:8000/admin/` para ver `sources`,
   `llm_calls` y `notifications_log`.
 - Una foto que llegó en un momento sin cuota se reintenta sola; no hay que hacer nada.
 

@@ -24,10 +24,12 @@ stamp="$(date +%Y%m%d-%H%M)"
 target="$BACKUP_DIR/agenda-$stamp.sql.gz"
 
 # --clean --if-exists deja el volcado listo para restaurar sobre una base existente.
+# `< /dev/null`: sin esto, `compose exec -T` se come el stdin del script que lo invoca.
 $COMPOSE exec -T postgres pg_dump \
   --username="$POSTGRES_USER" \
   --dbname="$POSTGRES_DB" \
   --clean --if-exists \
+  < /dev/null \
   | gzip > "$target.tmp"
 
 mv "$target.tmp" "$target"

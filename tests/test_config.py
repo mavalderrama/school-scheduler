@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import date
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -108,3 +110,30 @@ def test_harden_environment_keeps_api_key_without_claude_sdk(
     )
     harden_environment(s)
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-api-test"
+
+
+def test_env_example_has_no_inline_comments_on_empty_values() -> None:
+    """Un comentario al lado de una variable vacía se convierte en su valor.
+
+    python-dotenv no lo recorta cuando no hay valor antes del `#`, así que
+    `ANTHROPIC_API_KEY=  # no la definas` acaba valiendo "# no la definas" y el bot
+    arranca creyendo que hay una API key. Costó un despliegue descubrirlo.
+    """
+    example = Path(__file__).resolve().parent.parent / ".env.example"
+    offenders = [
+        line for line in example.read_text().splitlines() if re.match(r"^[A-Z_]+=[ \t]+#", line)
+    ]
+    assert offenders == [], (
+        "estas variables quedarían con el comentario como valor; "
+        f"mueve el comentario a su propia línea: {offenders}"
+    )
+
+
+def test_env_example_parses_to_usable_values() -> None:
+    """Ninguna variable de .env.example debe empezar por '#' al parsearse."""
+    example = Path(__file__).resolve().parent.parent / ".env.example"
+    for line in example.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        assert not value.strip().startswith("#"), f"{name} tomaría un comentario como valor"

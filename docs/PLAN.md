@@ -469,7 +469,9 @@ Validación en arranque (`config.py`): fallar con mensaje claro si un proveedor 
 
 ## 9. Despliegue en Proxmox
 
-### LXC `agenda-bot` (Debian 12, 2 vCPU, 2 GB RAM, 20 GB)
+### LXC `agenda-bot` (Debian 13, 2 vCPU, 2 GB RAM, 20 GB)
+
+> Desplegado el 2026-09-02: nodo `hades`, **VMID 109**, IP fija **10.70.70.60/24**, rootfs en `local-lvm`, plantilla `debian-13-standard_13.1-2`. Docker CE 29.7 desde el repositorio oficial (publica para `trixie`), storage driver `overlayfs`. Las copias del propio LXC (vzdump) las gestiona el usuario; el `pg_dump` de la aplicación va en `/etc/cron.d/agenda-backup` dentro del contenedor.
 - Opciones del contenedor: `features: nesting=1,keyctl=1`, unprivileged.
 - Docker + Compose plugin. `docker-compose.yml` con servicios `bot` y `postgres` (`pgvector/pgvector:0.8.6-pg18-trixie`; desde la imagen 18 el volumen se monta en `/var/lib/postgresql`), volúmenes `pgdata` y `./data` (fotos), `restart: unless-stopped`, healthcheck en postgres y `depends_on: condition: service_healthy`. El comando del bot es `python manage.py migrate --noinput && python -m app.main`.
 - El único puerto publicado es el del admin de Django (`ADMIN_BIND:ADMIN_PORT`, default `0.0.0.0:8000`), **solo en la LAN**; nunca hacer port-forward hacia internet. Aparte de eso el bot solo sale a `api.telegram.org`, a Ollama (red interna) y, si aplica, a `api.anthropic.com`.
