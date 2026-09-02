@@ -120,6 +120,10 @@ async def extract_photo(
             lambda p: p.extract_from_image(image_path, today),
             accept=lambda result: not is_weak(result),
         )
+    except LLMQuotaError as exc:
+        # La source queda `pending` a propósito: `retry_photos_job` la reintenta sola.
+        await _log_attempts("vision", exc.attempts)
+        raise
     except LLMError as exc:
         await _log_attempts("vision", exc.attempts)
         await repo.update_source(source_id, status=SourceStatus.FAILED)
@@ -156,13 +160,16 @@ async def ingest_photo(
     file_id: str,
     user_id: int,
     display_name: str,
+    chat_id: int,
     download: Downloader,
     settings: Settings,
     providers: LLMProviders,
 ) -> IngestResult:
     """Flujo completo de una foto. Lanza `IngestError` con un mensaje apto para el usuario."""
     user = await repo.upsert_user(user_id, display_name)
-    source = await repo.create_source(SourceKind.PHOTO, telegram_file_id=file_id, submitted_by=user)
+    source = await repo.create_source(
+        SourceKind.PHOTO, telegram_file_id=file_id, submitted_by=user, chat_id=chat_id
+    )
     image_path = settings.photos_dir / f"{source.pk}.jpg"
     try:
         await download(file_id, image_path)
@@ -177,10 +184,12 @@ async def ingest_photo(
     try:
         extraction, provider = await extract_photo(source.pk, image_path, settings, providers)
     except LLMQuotaError as exc:
+        # Cuota agotada: la source queda `pending` sin `raw_llm_output`, que es justo lo que
+        # busca `retry_photos_job`. No se reintenta en bucle aquí (regla del plan).
         log.warning("photo_quota", source_id=source.pk, error=str(exc))
         raise IngestError(
-            "El proveedor de IA está en límite de uso. Inténtalo de nuevo en un rato "
-            f"(~{settings.llm_retry_after_min} min).",
+            "⏳ El proveedor de IA está en límite de uso. Guardé la foto y la leo yo solo "
+            f"en ~{settings.llm_retry_after_min} min; no hace falta que hagas nada.",
             source.pk,
         ) from exc
     except LLMError as exc:

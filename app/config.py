@@ -132,6 +132,10 @@ class Settings(DjangoSettings):
     llm_cache_enabled: bool = True
     llm_cache_ttl_days: int = 30
 
+    # --- Robustez y operación ---
+    photo_retention_days: int = 90
+    retry_give_up_hours: int = 24
+
     # --- Ollama ---
     ollama_base_url: str | None = None
     ollama_vision_model: str = "qwen3-vl:8b"

@@ -62,7 +62,8 @@ async def run(settings: Settings) -> None:
     log.info("llm_providers", vision=providers.vision.name, text=providers.text.name)
 
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(settings=settings, providers=providers, pending=PendingStore())
+    pending = PendingStore()
+    dp = Dispatcher(settings=settings, providers=providers, pending=pending)
     dp.update.outer_middleware(AuthMiddleware(settings.allowed_user_ids, settings.allowed_chat_ids))
     dp.update.outer_middleware(DjangoDBMiddleware())
     dp.include_router(commands.router)
@@ -71,7 +72,7 @@ async def run(settings: Settings) -> None:
     dp.include_router(text.router)
 
     scheduler = build_scheduler(settings)
-    register_jobs(scheduler, settings, bot)
+    register_jobs(scheduler, settings, bot, providers, pending)
     scheduler.start()
 
     server = build_admin_server(settings) if settings.admin_enabled else None

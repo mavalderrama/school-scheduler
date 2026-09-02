@@ -19,7 +19,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections, transaction
-from django.db.models import F, Q
+from django.db.models import Count, F, Q, Sum
 
 from app.db.models import (
     AgendaEntry,
@@ -84,10 +84,83 @@ async def create_source(
     *,
     telegram_file_id: str | None = None,
     submitted_by: User | None = None,
+    chat_id: int | None = None,
 ) -> Source:
     return await Source.objects.acreate(
-        kind=kind, telegram_file_id=telegram_file_id, submitted_by=submitted_by
+        kind=kind,
+        telegram_file_id=telegram_file_id,
+        submitted_by=submitted_by,
+        chat_id=chat_id,
     )
+
+
+async def photos_awaiting_extraction(
+    older_than: datetime, *, give_up_before: datetime, limit: int = 3
+) -> list[Source]:
+    """Fotos descargadas que nunca llegaron a leerse (típicamente por cuota agotada).
+
+    `pending` + `local_path` + sin `raw_llm_output` es exactamente ese estado: una foto ya
+    extraída y a la espera de confirmación sí tiene `raw_llm_output`.
+    """
+    qs = (
+        Source.objects.filter(
+            kind=SourceKind.PHOTO,
+            status=SourceStatus.PENDING,
+            raw_llm_output__isnull=True,
+            local_path__isnull=False,
+            created_at__lte=older_than,
+            created_at__gt=give_up_before,
+        )
+        .select_related("submitted_by")
+        .order_by("id")[:limit]
+    )
+    return [source async for source in qs]
+
+
+async def abandon_stale_photos(give_up_before: datetime) -> list[Source]:
+    """Fotos que llevan demasiado sin poder leerse: se marcan `failed` y se avisa una vez."""
+    qs = Source.objects.filter(
+        kind=SourceKind.PHOTO,
+        status=SourceStatus.PENDING,
+        raw_llm_output__isnull=True,
+        local_path__isnull=False,
+        created_at__lte=give_up_before,
+    ).order_by("id")
+    stale = [source async for source in qs]
+    if stale:
+        await Source.objects.filter(pk__in=[s.pk for s in stale]).aupdate(
+            status=SourceStatus.FAILED
+        )
+    return stale
+
+
+async def photos_to_purge(before: datetime, limit: int = 200) -> list[Source]:
+    """Fotos ya resueltas y antiguas: se borra el archivo, la fila se conserva."""
+    qs = Source.objects.filter(
+        kind=SourceKind.PHOTO,
+        local_path__isnull=False,
+        created_at__lt=before,
+        status__in=[SourceStatus.CONFIRMED, SourceStatus.REJECTED, SourceStatus.FAILED],
+    ).order_by("id")[:limit]
+    return [source async for source in qs]
+
+
+async def clear_local_path(source_id: int) -> None:
+    await Source.objects.filter(pk=source_id).aupdate(local_path=None)
+
+
+async def recent_sources(limit: int = 3) -> list[Source]:
+    qs = Source.objects.select_related("submitted_by").order_by("-id")[:limit]
+    return [source async for source in qs]
+
+
+async def count_awaiting_extraction() -> int:
+    return await Source.objects.filter(
+        kind=SourceKind.PHOTO,
+        status=SourceStatus.PENDING,
+        raw_llm_output__isnull=True,
+        local_path__isnull=False,
+    ).acount()
 
 
 async def update_source(source_id: int, **fields: Any) -> None:
@@ -259,6 +332,10 @@ async def log_notification(
     )
 
 
+async def last_notification() -> NotificationLog | None:
+    return await NotificationLog.objects.order_by("-sent_at", "-id").afirst()
+
+
 async def notifications(kind: NotificationKind | None = None) -> list[NotificationLog]:
     qs = NotificationLog.objects.order_by("id")
     if kind is not None:
@@ -350,6 +427,40 @@ async def purge_expired_cache(now: datetime) -> int:
 
 async def cache_entries() -> list[LLMCacheEntry]:
     return [entry async for entry in LLMCacheEntry.objects.order_by("id")]
+
+
+async def llm_usage_by_provider(since: datetime) -> list[dict[str, Any]]:
+    """Consumo agregado por proveedor desde `since`, para /estado."""
+    qs = (
+        LLMCall.objects.filter(created_at__gte=since)
+        .values("provider")
+        .annotate(
+            calls=Count("id"),
+            errors=Count("id", filter=Q(ok=False)),
+            input_tokens=Sum("input_tokens"),
+            output_tokens=Sum("output_tokens"),
+            cache_read_tokens=Sum("cache_read_tokens"),
+            cost_usd=Sum("cost_usd"),
+        )
+        .order_by("provider")
+    )
+    return [dict(row) async for row in qs]
+
+
+async def last_call_by_provider() -> dict[str, LLMCall]:
+    """Última llamada de cada proveedor: salud observada sin gastar un token."""
+    latest: dict[str, LLMCall] = {}
+    qs = LLMCall.objects.order_by("-id")[:200]
+    async for call in qs:
+        latest.setdefault(call.provider, call)
+    return latest
+
+
+async def cache_stats() -> tuple[int, int]:
+    """(entradas vigentes, aciertos acumulados)."""
+    entries = await LLMCacheEntry.objects.acount()
+    total = await LLMCacheEntry.objects.aaggregate(hits=Sum("hits"))
+    return entries, int(total["hits"] or 0)
 
 
 async def llm_calls(task: str | None = None) -> list[LLMCall]:

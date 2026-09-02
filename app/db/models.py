@@ -96,6 +96,13 @@ class Source(models.Model):
         db_default=SourceStatus.PENDING,
         verbose_name="estado",
     )
+    chat_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        verbose_name="chat de origen",
+        help_text="Chat de Telegram donde llegó, para reintentar y responder tras un reinicio.",
+    )
     llm_cache_key = models.TextField(
         null=True,
         blank=True,

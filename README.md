@@ -42,6 +42,57 @@ Cada proveedor exige sus variables (`OLLAMA_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`
 `ANTHROPIC_API_KEY`); el arranque falla con un mensaje claro si falta alguna.
 Si no se usa `claude_sdk`, `BOT_IMAGE_TARGET=base` produce una imagen sin el binario de Claude Code.
 
+## Runbook
+
+### Cambiar de proveedor o de modelo
+
+1. Editar `LLM_VISION_PROVIDER` / `LLM_TEXT_PROVIDER` (o `CLAUDE_SDK_MODEL`,
+   `OLLAMA_VISION_MODEL`, `ANTHROPIC_API_MODEL`) en `.env`.
+2. `make check-llm` para confirmar que el proveedor nuevo responde de verdad.
+3. `make up` (o `make build && make up` si cambió `BOT_IMAGE_TARGET`).
+
+Cambiar de modelo invalida la caché solo si cambian los prompts; las entradas viejas
+siguen sirviéndose. Para forzar lectura nueva, borra las filas de `llm_cache` en el admin.
+
+### Rotar el token de la suscripción (caduca al año)
+
+1. En la laptop, **no** en el LXC: `claude setup-token`.
+2. Copiar la salida a `CLAUDE_CODE_OAUTH_TOKEN` en el `.env` del LXC y poner la fecha de
+   hoy en `CLAUDE_TOKEN_ISSUED_AT`.
+3. `make up && make check-llm`. `/estado` avisa cuando quedan menos de 30 días.
+
+### Copias de seguridad
+
+`scripts/backup.sh` corre en el cron del **host** (no dentro del bot: una copia que
+depende de que la app esté sana es la que falta cuando hace falta):
+
+```
+0 3 * * *  cd /opt/agenda-escolar-bot && ./scripts/backup.sh >> /var/log/agenda-backup.log 2>&1
+```
+
+Guarda en `data/backups/` y rota a 14 días. Restaurar:
+
+```
+gunzip -c data/backups/agenda-YYYYmmdd-HHMM.sql.gz | \
+  docker compose exec -T postgres psql -U agenda -d agenda
+```
+
+### Agregar un usuario
+
+1. Pedirle su id a @userinfobot y añadirlo a `ALLOWED_USER_IDS` (y el chat a
+   `ALLOWED_CHAT_IDS`; si debe recibir la notificación diaria, a `NOTIFY_CHAT_IDS`).
+2. `make up`. La fila en `users` se crea sola la primera vez que mande algo; el nombre y
+   el rol se pueden editar en el admin.
+
+### Qué mirar cuando algo va mal
+
+- `/estado` en Telegram: última notificación, últimas fuentes, consumo del mes por
+  proveedor, fotos esperando cuota y vencimiento del token. `/estado check` además hace
+  un healthcheck real (gasta una llamada).
+- `make logs`, y el admin en `http://<ip-del-lxc>:8000/admin/` para ver `sources`,
+  `llm_calls` y `notifications_log`.
+- Una foto que llegó en un momento sin cuota se reintenta sola; no hay que hacer nada.
+
 ## Desarrollo local
 
 ```

@@ -6,15 +6,20 @@ aquí y tanto `handlers/callbacks.py` como `handlers/text.py` la llaman.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from aiogram import Bot
 
 from app.bot.handlers.photo import start_ingest
+from app.bot.keyboards import confirmation_keyboard
 from app.config import Settings
 from app.db import repo
+from app.db.models import Source, SourceStatus
 from app.llm import compose
-from app.llm.provider import LLMProviders
+from app.llm.provider import LLMError, LLMProviders, LLMQuotaError
 from app.log import get_logger
-from app.services import agenda
+from app.services import agenda, ingest
 from app.services.confirm import PendingEdit, PendingPhoto, PendingStore
 
 log = get_logger(__name__)
@@ -64,3 +69,50 @@ async def remove_chosen(entry_id: int, user_id: int | None) -> str:
         return "Esa entrada ya no está vigente."
     await agenda.remove_entry(entry.pk, user_id)
     return compose.format_removed(entry)
+
+
+async def resume_photo(
+    bot: Bot,
+    source: Source,
+    settings: Settings,
+    providers: LLMProviders,
+    pending: PendingStore,
+) -> bool:
+    """Reintenta una foto que quedó sin leer (cuota agotada) y pide confirmación.
+
+    Devuelve False sin ruido si todavía no se puede: el job lo volverá a intentar.
+    """
+    if source.chat_id is None or source.local_path is None:
+        return False
+    if pending.get(source.chat_id) is not None:
+        return False  # el chat está ocupado con otra confirmación
+    image_path = Path(source.local_path)
+    if not await asyncio.to_thread(image_path.is_file):
+        log.warning("retry_photo_missing_file", source_id=source.pk, path=source.local_path)
+        await repo.update_source(source.pk, status=SourceStatus.FAILED)
+        return False
+
+    try:
+        extraction, _ = await ingest.extract_photo(source.pk, image_path, settings, providers)
+    except LLMQuotaError:
+        return False  # sigue sin cuota; se reintenta en la próxima pasada
+    except LLMError as exc:
+        log.warning("retry_photo_failed", source_id=source.pk, error=str(exc))
+        return False
+
+    await bot.send_message(source.chat_id, "⏳ Ya pude leer la foto que quedó pendiente:")
+    summary = await bot.send_message(
+        source.chat_id,
+        compose.format_extraction(extraction),
+        reply_markup=confirmation_keyboard(source.pk),
+    )
+    pending.set(
+        PendingPhoto(
+            source_id=source.pk,
+            chat_id=source.chat_id,
+            extraction=extraction,
+            summary_message_id=summary.message_id,
+        )
+    )
+    log.info("retry_photo_ok", source_id=source.pk, chat_id=source.chat_id)
+    return True

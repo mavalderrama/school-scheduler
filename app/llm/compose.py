@@ -148,7 +148,7 @@ HELP_TEXT = (
     "• «quita lo del jueves»\n"
     "\n"
     "Comandos (funcionan aunque la IA esté caída):\n"
-    "/hoy · /manana · /semana · /pendiente · /ayuda · /ping"
+    "/hoy · /manana · /semana · /pendiente · /estado · /ayuda · /ping"
 )
 
 NO_LLM_TEXT = (

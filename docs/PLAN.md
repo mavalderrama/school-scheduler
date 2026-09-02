@@ -295,6 +295,7 @@ CREATE TABLE llm_calls (               -- consumo por proveedor, para vigilar cu
 Añadido tras la Fase 2 (migración `0002`, ver sección 3.0.1):
 
 ```sql
+ALTER TABLE sources   ADD COLUMN chat_id BIGINT;              -- 0003: reintentos tras reinicio
 ALTER TABLE llm_calls ADD COLUMN cache_read_tokens INTEGER;   -- claude_sdk y anthropic_api
 ALTER TABLE llm_calls ADD COLUMN cache_write_tokens INTEGER;
 ALTER TABLE sources   ADD COLUMN llm_cache_key TEXT;          -- para invalidar al descartar

@@ -11,7 +11,8 @@ from aiogram.types import Message
 from app.config import Settings
 from app.db import repo
 from app.llm import compose
-from app.services import chat, notify
+from app.llm.provider import LLMProviders
+from app.services import chat, notify, status
 from app.services.confirm import PendingEdit, PendingPhoto, PendingStore
 
 router = Router(name="commands")
@@ -96,3 +97,14 @@ async def cmd_pendiente(message: Message, pending: PendingStore) -> None:
         )
         return
     await message.answer("✍️ Hay una baja pendiente de confirmar.")
+
+
+@router.message(Command("estado"))
+async def cmd_estado(message: Message, settings: Settings, providers: LLMProviders) -> None:
+    """Informe de operación. `/estado check` además hace healthcheck real (gasta cuota)."""
+    text = (message.text or "").split()
+    if len(text) > 1 and text[1].lower() in {"check", "full", "salud"}:
+        await message.answer("🩺 Comprobando proveedores (esto gasta una llamada)...")
+        await message.answer(await status.check_providers(providers))
+        return
+    await message.answer(await status.build_status(settings, providers))

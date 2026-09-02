@@ -8,6 +8,9 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings
 from app.scheduler.jobs import build_scheduler, register_jobs
+from app.services.confirm import PendingStore
+from tests.test_ingest import providers
+from tests.test_provider import FakeProvider
 
 
 def _field(trigger: CronTrigger, name: str) -> str:
@@ -18,10 +21,10 @@ def test_register_jobs_uses_configured_times_and_timezone(settings: Settings) ->
     settings = settings.model_copy(update={"daily_notify_time": "18:30", "gap_check_time": "17:05"})
     scheduler = build_scheduler(settings)
     bot: Any = object()
-    register_jobs(scheduler, settings, bot)
+    register_jobs(scheduler, settings, bot, providers(FakeProvider("a")), PendingStore())
 
     jobs = {job.id: job for job in scheduler.get_jobs()}
-    assert set(jobs) == {"daily_notify", "gap_check"}
+    assert set(jobs) == {"daily_notify", "gap_check", "retry_photos", "purge_photos"}
 
     daily = jobs["daily_notify"].trigger
     assert isinstance(daily, CronTrigger)

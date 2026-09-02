@@ -41,6 +41,7 @@ async def start_ingest(
             file_id=photo.file_id,
             user_id=photo.user_id,
             display_name=photo.display_name,
+            chat_id=chat_id,
             download=download,
             settings=settings,
             providers=providers,
