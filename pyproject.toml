@@ -6,9 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiogram>=3.31,<4",
-    "sqlalchemy[asyncio]>=2.0.52,<3",
-    "asyncpg>=0.31",
-    "alembic>=1.19",
+    "django>=6.1,<6.2",
+    "psycopg[binary,pool]>=3.2.8,<4",
+    "pgvector>=0.5,<0.6",
+    "uvicorn>=0.52,<1",
+    "django-stubs-ext>=6.1",
     "pydantic>=2.13",
     "pydantic-settings>=2.15",
     "structlog>=26.1",
@@ -25,8 +27,10 @@ claude = ["claude-agent-sdk>=0.2.151"]
 dev = [
     "pytest>=9.1",
     "pytest-asyncio>=1.4",
+    "pytest-django>=4.14",
     "ruff>=0.16",
     "mypy>=2.3",
+    "django-stubs>=6.1",
 ]
 
 [build-system]
@@ -44,15 +48,24 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # tildes y ñ en comentarios/docstrings en español
 
+[tool.ruff.lint.per-file-ignores]
+"app/db/migrations/*" = ["E501", "RUF012"]  # generadas por makemigrations
+"app/db/admin.py" = ["RUF012"]   # list_display & co. son atributos de clase por diseño
+"app/db/models.py" = ["RUF012"]  # Meta.constraints / Meta.indexes
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
-plugins = ["pydantic.mypy"]
+plugins = ["mypy_django_plugin.main", "pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "claude_agent_sdk.*"]
+module = ["apscheduler.*", "claude_agent_sdk.*", "pgvector.*"]
 ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "app.django_settings"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+DJANGO_SETTINGS_MODULE = "tests.django_settings_test"

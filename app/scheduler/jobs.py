@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Awaitable, Callable
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from asgiref.sync import ThreadSensitiveContext
 
 from app.config import Settings
+from app.db import repo
 from app.log import get_logger
 
 log = get_logger(__name__)
+
+
+def db_job[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Da a cada ejecución del job su propio hilo/conexión y limpia al terminar.
+
+    Mismo bracket que `DjangoDBMiddleware`; usarlo en todo job que toque la DB.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        async with ThreadSensitiveContext():  # type: ignore[no-untyped-call]
+            await repo.close_old()
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                await repo.close_old()
+
+    return wrapper
 
 
 def build_scheduler(settings: Settings) -> AsyncIOScheduler:

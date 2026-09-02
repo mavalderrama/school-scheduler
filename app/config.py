@@ -1,8 +1,13 @@
 """Configuración de la aplicación.
 
-Se lee de variables de entorno y de `.env` con pydantic-settings. La validación
-de arranque falla con un mensaje claro si un proveedor de LLM seleccionado no
-tiene sus variables, y avisa si hay credenciales de Claude en conflicto.
+Se lee de variables de entorno y de `.env` con pydantic-settings. Hay dos clases:
+
+- `DjangoSettings`: el subconjunto que Django necesita (DB, admin, zona horaria), con
+  valores por defecto seguros para que `manage.py`, `makemigrations` y el plugin de mypy
+  puedan importar `app/django_settings.py` sin un `.env` completo.
+- `Settings(DjangoSettings)`: todo lo del bot. Falla en arranque con un mensaje claro si
+  un proveedor de LLM seleccionado no tiene sus variables, si el admin está habilitado
+  con la clave secreta insegura, o si hay credenciales de Claude en conflicto.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import re
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError, field_validator, model_validator
@@ -21,6 +27,9 @@ ProviderName = Literal["ollama", "claude_sdk", "anthropic_api"]
 FallbackName = Literal["none", "ollama", "claude_sdk", "anthropic_api"]
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+INSECURE_SECRET_KEY = "insecure-dev-key-change-me"
+"""Valor por defecto de DJANGO_SECRET_KEY; el bot se niega a arrancar el admin con él."""
 
 
 class ConfigError(RuntimeError):
@@ -34,17 +43,75 @@ def _parse_int_list(value: object) -> object:
     return value
 
 
+def _parse_str_list(value: object) -> object:
+    """Convierte "a,b" en ["a", "b"]; deja pasar listas ya construidas."""
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return value
+
+
 IntList = Annotated[list[int], NoDecode]
+StrList = Annotated[list[str], NoDecode]
 
 
-class Settings(BaseSettings):
-    """Todas las variables de entorno del bot (ver sección 8 del plan)."""
+class DjangoSettings(BaseSettings):
+    """Lo que Django necesita. Importable sin `.env` (manage.py, mypy, makemigrations)."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    database_url: str = "postgresql://agenda:agenda@localhost:5432/agenda"
+    tz: str = "America/Bogota"
+
+    # --- Admin web (Django, solo LAN) ---
+    django_secret_key: str = INSECURE_SECRET_KEY
+    django_debug: bool = False
+    django_allowed_hosts: StrList = ["*"]
+    django_csrf_trusted_origins: StrList = []
+    admin_enabled: bool = True
+    admin_host: str = "0.0.0.0"
+    admin_port: int = 8000
+    django_superuser_username: str | None = None
+    django_superuser_password: str | None = None
+    django_superuser_email: str = ""
+
+    @field_validator("django_allowed_hosts", "django_csrf_trusted_origins", mode="before")
+    @classmethod
+    def _split_strs(cls, value: object) -> object:
+        return _parse_str_list(value)
+
+    @field_validator("tz")
+    @classmethod
+    def _check_tz(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"zona horaria desconocida {value!r}") from exc
+        return value
+
+    @field_validator("database_url")
+    @classmethod
+    def _check_database_url(cls, value: str) -> str:
+        scheme = urlsplit(value).scheme
+        if "+" in scheme:
+            raise ValueError(
+                "DATABASE_URL ya no lleva dialecto de SQLAlchemy (p. ej. '+asyncpg'); "
+                "usar postgresql://user:pass@host:5432/db"
+            )
+        if scheme not in {"postgresql", "postgres"}:
+            raise ValueError(f"esquema no soportado {scheme!r}; usar postgresql://")
+        return value
+
+    @property
+    def zoneinfo(self) -> ZoneInfo:
+        return ZoneInfo(self.tz)
+
+
+class Settings(DjangoSettings):
+    """Todas las variables de entorno del bot (ver sección 8 del plan)."""
 
     # --- Telegram ---
     telegram_bot_token: str
@@ -77,9 +144,8 @@ class Settings(BaseSettings):
     anthropic_api_model: str = "claude-sonnet-4-6"
 
     # --- Infra ---
-    database_url: str
+    database_url: str  # en el bot vuelve a ser obligatoria
     data_dir: Path = Path("/data")
-    tz: str = "America/Bogota"
     daily_notify_time: str = "19:00"
     gap_check_time: str = "18:00"
     skip_weekend: bool = True
@@ -96,15 +162,6 @@ class Settings(BaseSettings):
     def _check_hhmm(cls, value: str) -> str:
         if not _HHMM.match(value):
             raise ValueError(f"hora inválida {value!r}; usar formato HH:MM")
-        return value
-
-    @field_validator("tz")
-    @classmethod
-    def _check_tz(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"zona horaria desconocida {value!r}") from exc
         return value
 
     @model_validator(mode="after")
@@ -127,6 +184,17 @@ class Settings(BaseSettings):
                 problems.append(
                     "el proveedor anthropic_api está seleccionado pero falta ANTHROPIC_API_KEY"
                 )
+
+        if self.admin_enabled and self.django_secret_key == INSECURE_SECRET_KEY:
+            problems.append(
+                "el admin está habilitado (ADMIN_ENABLED=true) pero DJANGO_SECRET_KEY no está "
+                "definida; generarla con "
+                '`python -c "import secrets; print(secrets.token_urlsafe(50))"`'
+            )
+        if bool(self.django_superuser_username) != bool(self.django_superuser_password):
+            problems.append(
+                "DJANGO_SUPERUSER_USERNAME y DJANGO_SUPERUSER_PASSWORD van juntas (ambas o ninguna)"
+            )
         if problems:
             raise ValueError("; ".join(problems))
         return self
@@ -145,10 +213,6 @@ class Settings(BaseSettings):
             if candidate != "none" and candidate not in seen:
                 seen.append(candidate)  # type: ignore[arg-type]
         return seen
-
-    @property
-    def zoneinfo(self) -> ZoneInfo:
-        return ZoneInfo(self.tz)
 
     @property
     def photos_dir(self) -> Path:
@@ -182,6 +246,8 @@ def startup_warnings(settings: Settings) -> list[str]:
             "CLAUDE_TOKEN_ISSUED_AT no está definida; el token de suscripción caduca al año "
             "y /estado no podrá avisar."
         )
+    if settings.admin_enabled and settings.django_debug:
+        warnings.append("DJANGO_DEBUG=true: el admin muestra trazas completas; solo para depurar.")
     return warnings
 
 

@@ -8,10 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Fases (sección 10 del plan):
 
-- **Fase 0 (hecha):** esqueleto, config con validación de proveedores, bot que responde `/start` y `/ping` solo a la whitelist, migración 001, abstracción `LLMProvider` con los tres proveedores (healthcheck real; extracción e intención son stubs `NotImplementedError`), `scripts/check_llm.py`, Dockerfile con dos targets, compose, Makefile.
+- **Fase 0 (hecha):** esqueleto, config con validación de proveedores, bot que responde `/start` y `/ping` solo a la whitelist, modelos Django + migración `0001_initial` (con la extensión `vector`), admin de Django embebido en el proceso del bot, abstracción `LLMProvider` con los tres proveedores (healthcheck real; extracción e intención son stubs `NotImplementedError`), `scripts/check_llm.py`, Dockerfile con dos targets, compose, Makefile.
 - **Fase 1:** ingesta de fotos + confirmación. **Fase 2:** notificación diaria. **Fase 3:** consultas por texto. **Fase 4:** robustez y `/estado`. **Fase 5 (opcional):** Home Assistant.
 
 Decisión del usuario: **proveedor principal = suscripción Claude (`claude_sdk`)** para visión y texto. Ollama y API key quedan implementados para cambiar solo por variables de entorno.
+
+Decisión del usuario (2026-09-02): **persistencia con Django** (ORM, migraciones y admin) en lugar de SQLAlchemy + Alembic, para tener el admin como panel de operación sin construir UI. El admin corre **dentro del proceso del bot**. Postgres 18 con `pgvector` (extensión creada en 0001; todavía no hay columnas vector, se decidirán más adelante).
 
 ## Qué es
 
@@ -27,21 +29,25 @@ Decisión del usuario: **proveedor principal = suscripción Claude (`claude_sdk`
 
 ## Stack
 
-Python 3.12 · `aiogram` 3.x con **long polling** (nada expuesto a internet) · PostgreSQL 16 · SQLAlchemy 2.x async (`asyncpg`) + Alembic · APScheduler (`AsyncIOScheduler`, en el mismo proceso del bot) · `pydantic-settings` · `structlog` · `uv` para dependencias (`uv.lock` versionado) · Docker Compose (servicios `bot` y `postgres`). Ollama, si se usa, corre en otro host de la red interna.
+Python 3.12 · `aiogram` 3.x con **long polling** · PostgreSQL 18 + `pgvector` (imagen `pgvector/pgvector:0.8.6-pg18-trixie`) · **Django 6.1** (ORM, migraciones y admin) con `psycopg` 3 (`binary` + `pool`) · `uvicorn` embebido para el admin · APScheduler (`AsyncIOScheduler`, en el mismo proceso del bot) · `pydantic-settings` · `structlog` · `uv` para dependencias (`uv.lock` versionado) · Docker Compose (servicios `bot` y `postgres`). Ollama, si se usa, corre en otro host de la red interna.
 
 ## Comandos
 
 ```
 make dev              # docker compose up --build + logs (aplica migraciones al arrancar)
 make down / up / logs / ps / shell
-make migrate          # alembic upgrade head dentro del contenedor
-make revision m="..." # alembic revision --autogenerate
+make migrate          # manage.py migrate dentro del contenedor
+make manage cmd="..." # cualquier comando de manage.py en el contenedor (p. ej. changepassword admin)
 make check-llm        # scripts/check_llm.py dentro del contenedor
 make install          # uv sync --all-extras (local)
-make test             # pytest (no necesita Postgres ni red)
+make makemigrations   # manage.py makemigrations agenda (local; escribe en app/db/migrations)
+make migrations-check # falla si los modelos tienen cambios sin migración
+make test-db-up/down  # Postgres desechable de tests (docker-compose.test.yml, 127.0.0.1:5533)
+make test             # pytest completo (levanta el Postgres de tests; necesita Docker)
+make test-unit        # pytest -m "not django_db" (sin Docker)
 make lint / fmt       # ruff
-make typecheck        # mypy --strict sobre app, scripts, tests y alembic
-make check            # lint + typecheck + test
+make typecheck        # mypy --strict sobre app, scripts, tests y manage.py
+make check            # lint + typecheck + migrations-check + test
 make check-llm-local  # check_llm.py con el .env local
 ```
 
@@ -52,12 +58,14 @@ Un solo test: `uv run pytest tests/test_config.py::test_defaults_use_claude_subs
 ## Convenciones de código
 
 - Comentarios y docstrings en **español**; nombres de variables, funciones y clases en **inglés**.
-- Todo lo que dependa de fecha/hora usa `settings.zoneinfo` (`ZoneInfo("America/Bogota")`, sin horario de verano).
+- Todo lo que dependa de fecha/hora usa `settings.zoneinfo` (`ZoneInfo("America/Bogota")`, sin horario de verano). Django corre con `USE_TZ=True` y `TIME_ZONE` desde la misma variable `TZ`.
 - Nada de SQL fuera de `app/db/repo.py`.
+- **ORM de Django en código async:** lecturas y escrituras simples con los métodos `a*` (`aget`, `acreate`, `async for`); escrituras multi-sentencia como **función sync con `transaction.atomic()` envuelta en `sync_to_async`** (las transacciones no son async). `select_related` antes de tocar una FK desde código async. Nunca `DJANGO_ALLOW_ASYNC_UNSAFE`. Todo handler pasa por `DjangoDBMiddleware` y todo job de APScheduler se decora con `db_job` (hilo y conexión propios por update/job + `close_old_connections`).
+- `django.setup()` se hace **solo** en `app/django_bootstrap.setup_django()`, llamado por los entrypoints (`app/main.py`, `manage.py`, `app/asgi.py`) antes de importar modelos. Nunca desde `app/db/__init__.py`.
+- Los modelos usan `TextChoices` + `CheckConstraint` (no ENUM de Postgres), `db_default=Now()` en `created_at`, `on_delete=PROTECT` en todas las FK (nada se borra) y `db_table`/`db_column` para que el SQL de la sección 5 del plan siga siendo cierto.
 - Prompts en `app/llm/prompts/*.md`, cargados con `load_prompt(name)`, **compartidos por los tres proveedores**; cada proveedor solo cambia cómo los envía y cómo obtiene el JSON.
-- En `app/db/models.py` la columna `text` de `agenda_entries` sombrea `sqlalchemy.text`; ahí se importa como `sa_text`.
-- `ruff` (line-length 100), `mypy --strict` con el plugin de pydantic; `pytest-asyncio` en modo `auto`.
-- Tests unitarios no dependen de Postgres, Telegram ni LLM reales: `tests/conftest.py::make_settings` construye `Settings` sin leer `.env`, y `query()` del SDK se sustituye con `monkeypatch`.
+- `ruff` (line-length 100), `mypy --strict` con los plugins de pydantic y django-stubs (`django_stubs_ext.monkeypatch()` vive en `app/django_settings.py` porque el plugin importa ese módulo); `pytest-asyncio` en modo `auto` + `pytest-django`.
+- Tests: `tests/conftest.py::make_settings` construye `Settings` sin leer `.env`; `query()` del SDK se sustituye con `monkeypatch`. Los tests que tocan la DB llevan `pytest.mark.django_db(transaction=True)` (obligatorio en tests `async def`: el ORM async corre en otro hilo/conexión que la transacción de test) y usan `tests/django_settings_test.py` (sin pool).
 
 ## Arquitectura (lo que hay que entender antes de tocar código)
 
@@ -71,21 +79,25 @@ Un solo test: `uv run pytest tests/test_config.py::test_defaults_use_claude_subs
 
 **Credenciales de Claude.** En Claude Code `ANTHROPIC_API_KEY` tiene precedencia sobre `CLAUDE_CODE_OAUTH_TOKEN`, y el subproceso del SDK hereda el entorno del proceso. Por eso `config.harden_environment()` retira `ANTHROPIC_API_KEY` y `ANTHROPIC_AUTH_TOKEN` de `os.environ` en arranque cuando `claude_sdk` está en uso; `anthropic_api` recibe la key desde `settings`, no del entorno. `startup_warnings()` avisa si ambas están definidas. No usar `--bare` (no lee el token).
 
-**Datos: nunca borrar, siempre versionar.** Cada foto o corrección es una fila en `sources`. Al confirmar una source, `services/agenda.apply_source()` (Fase 1) marca como `is_active=false, superseded_by=<nueva source>` las entradas activas previas de cada fecha cubierta e inserta las nuevas, todo en una transacción. Una corrección por texto desactiva solo la entrada afectada. Rechazar = no tocar nada, status `rejected`.
+**Configuración en dos capas.** `app/config.py` tiene `DjangoSettings` (DB, admin, `TZ`; con defaults, importable sin `.env`) y `Settings(DjangoSettings)` (todo el bot; `DATABASE_URL` obligatoria, valida proveedores, exige `DJANGO_SECRET_KEY` real si `ADMIN_ENABLED=true`). `app/django_settings.py` deriva los settings de Django de `DjangoSettings` y parsea `DATABASE_URL` con `database_from_url()` (`CONN_MAX_AGE=0`, pool de psycopg).
+
+**Datos: nunca borrar, siempre versionar.** Cada foto o corrección es una fila en `sources`. Al confirmar una source, `services/agenda.apply_source()` (Fase 1) marca como `is_active=false, superseded_by=<nueva source>` las entradas activas previas de cada fecha cubierta e inserta las nuevas, todo en una transacción. Una corrección por texto desactiva solo la entrada afectada. Rechazar = no tocar nada, status `rejected`. El admin tampoco permite borrar (`has_delete_permission` → `False`, sin `delete_selected`); `users` y `agenda_entries` son editables, el resto solo lectura.
 
 **Nada se da por bueno sin confirmación.** Foto → extracción → resumen con `doubts` + inline keyboard (✅ Confirmar / ✏️ Corregir / ❌ Descartar). `add_entry` y `remove_entry` por texto también pasan por confirmación. Una confirmación pendiente por chat.
 
-**La notificación diaria no usa LLM.** `scheduler/jobs.py` + `services/notify.py` (Fase 2) a las `DAILY_NOTIFY_TIME`: consulta entradas activas de mañana y envía a `NOTIFY_CHAT_IDS`. Si no hay nada, envía un nudge pidiendo foto. Idempotente vía `notifications_log`. Los comandos `/` tampoco dependen del LLM.
+**La notificación diaria no usa LLM.** `scheduler/jobs.py` + `services/notify.py` (Fase 2) a las `DAILY_NOTIFY_TIME`: consulta entradas activas de mañana y envía a `NOTIFY_CHAT_IDS`. Si no hay nada, envía un nudge pidiendo foto. Idempotente vía `notifications_log`, que tiene un unique parcial `notif_log_ok_unique` sobre `(kind, target_date, chat_id) WHERE ok`. Los comandos `/` tampoco dependen del LLM.
 
-**Transporte aislado.** Todo lo de Telegram vive en `app/bot/`. `AuthMiddleware` va como `outer_middleware` de `dp.update` y descarta en silencio cualquier update cuyo `user_id` y `chat_id` no estén ambos en la whitelist (mensajes, ediciones y callbacks).
+**Transporte aislado.** Todo lo de Telegram vive en `app/bot/`. `AuthMiddleware` va como `outer_middleware` de `dp.update` y descarta en silencio cualquier update cuyo `user_id` y `chat_id` no estén ambos en la whitelist (mensajes, ediciones y callbacks). `DjangoDBMiddleware` va después, para que los rechazados no toquen la DB.
 
-**Arranque** (`app/main.py`): `load_settings()` → logging → warnings → `harden_environment` → `check_connection` a Postgres (falla rápido) → `build_providers` → `Dispatcher` con `settings`, `providers` y `session_factory` como workflow data → scheduler → polling. En compose el comando es `alembic upgrade head && python -m app.main`.
+**Admin embebido.** `app/web.py` construye un `uvicorn.Server` (subclase que no toca las señales del proceso; `lifespan="off"`, `log_config=None`) sobre `app/asgi.py` (`ASGIStaticFilesHandler(get_asgi_application())`, sin `collectstatic`). Solo `admin/` (`app/admin_urls.py`). Cada request del admin corre en su propio hilo (`ASGIHandler` + `ThreadSensitiveContext`), sin bloquear al bot. Superusuario creado en arranque por `repo.ensure_superuser` si están `DJANGO_SUPERUSER_USERNAME/PASSWORD` (no reescribe la contraseña).
 
-Esquema SQL en la sección 5 del plan y en `alembic/versions/001_initial.py`; contratos pydantic en la sección 6 y en `app/llm/schemas.py`.
+**Arranque** (`app/main.py`): `setup_django()` → `load_settings()` → logging → warnings → `harden_environment` → `repo.check_connection()` (falla rápido) → `ensure_superuser` → `build_providers` → `Dispatcher` con `settings` y `providers` como workflow data → middlewares → scheduler → `asyncio.TaskGroup` con `dp.start_polling(handle_signals=False)`, `server.serve()` y una tarea que espera SIGINT/SIGTERM y apaga ambos (`server.should_exit`, `dp.stop_polling()`). En compose el comando es `python manage.py migrate --noinput && python -m app.main`.
+
+Esquema SQL en la sección 5 del plan; modelos en `app/db/models.py` y migración en `app/db/migrations/0001_initial.py`; contratos pydantic en la sección 6 y en `app/llm/schemas.py`.
 
 ## Variables de entorno
 
-Lista canónica con comentarios en `.env.example`. Validación en `app/config.py`: falla en arranque con mensaje claro si un proveedor seleccionado no tiene sus variables, si un fallback es igual a su principal, o si hora/zona horaria son inválidas.
+Lista canónica con comentarios en `.env.example`. Validación en `app/config.py`: falla en arranque con mensaje claro si un proveedor seleccionado no tiene sus variables, si un fallback es igual a su principal, si hora/zona horaria son inválidas, si `DATABASE_URL` lleva dialecto de SQLAlchemy, si el admin está habilitado sin `DJANGO_SECRET_KEY`, o si el superusuario tiene usuario sin contraseña.
 
 | Grupo | Variables |
 |---|---|
@@ -94,9 +106,10 @@ Lista canónica con comentarios en `.env.example`. Validación en `app/config.py
 | Ollama | `OLLAMA_BASE_URL`, `OLLAMA_VISION_MODEL`, `OLLAMA_TEXT_MODEL` |
 | Claude (suscripción) | `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_TOKEN_ISSUED_AT`, `CLAUDE_SDK_MODEL`, `CLAUDE_SDK_MAX_TURNS` |
 | Claude (API key) | `ANTHROPIC_API_KEY`, `ANTHROPIC_API_MODEL` |
-| Infra | `DATABASE_URL`, `POSTGRES_USER/PASSWORD/DB` (compose), `DATA_DIR`, `TZ`, `DAILY_NOTIFY_TIME`, `GAP_CHECK_TIME`, `SKIP_WEEKEND`, `LOG_LEVEL`, `LOG_FORMAT` (`console` \| `json`), `BOT_IMAGE_TARGET` (`with-claude` \| `base`) |
+| Infra | `DATABASE_URL` (`postgresql://user:pass@host:5432/db`), `POSTGRES_USER/PASSWORD/DB` (compose), `DATA_DIR`, `TZ`, `DAILY_NOTIFY_TIME`, `GAP_CHECK_TIME`, `SKIP_WEEKEND`, `LOG_LEVEL`, `LOG_FORMAT` (`console` \| `json`), `BOT_IMAGE_TARGET` (`with-claude` \| `base`) |
+| Admin (Django, solo LAN) | `DJANGO_SECRET_KEY`, `DJANGO_DEBUG`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, `ADMIN_ENABLED`, `ADMIN_HOST`, `ADMIN_PORT`, `ADMIN_BIND` (IP del host donde compose publica el puerto), `DJANGO_SUPERUSER_USERNAME/PASSWORD/EMAIL` |
 | Home Assistant (Fase 5, opcional) | `HA_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` |
 
 ## Despliegue
 
-LXC Debian 12 en Proxmox (`nesting=1,keyctl=1`, unprivileged) con Docker Compose. El bot no publica puertos. `Dockerfile` sobre `python:3.12-slim` con `uv sync --frozen`; usuario `bot` (uid 1000) sin privilegios, `/data` es suyo (el bind mount `./data` debe ser escribible por uid 1000). Targets: `base` (solo Ollama/API) y `with-claude` (añade el extra `claude` y verifica en build que el binario empaquetado arranca). El token de suscripción se genera en la laptop con `claude setup-token`, no en el LXC, y caduca al año. Detalles en la sección 9 del plan.
+LXC Debian 12 en Proxmox (`nesting=1,keyctl=1`, unprivileged) con Docker Compose. El único puerto publicado es el del admin (`ADMIN_BIND:ADMIN_PORT`, default `0.0.0.0:8000`), **solo en la LAN**; nunca hacer port-forward hacia internet. `Dockerfile` sobre `python:3.12-slim` con `uv sync --frozen`; usuario `bot` (uid 1000) sin privilegios, `/data` es suyo (el bind mount `./data` debe ser escribible por uid 1000). Targets: `base` (solo Ollama/API) y `with-claude` (añade el extra `claude` y verifica en build que el binario empaquetado arranca). Postgres 18: el volumen `pgdata` se monta en `/var/lib/postgresql` (cambió respecto a las imágenes ≤17); `CREATE EXTENSION vector` en 0001 necesita superusuario de Postgres (el de compose lo es). El token de suscripción se genera en la laptop con `claude setup-token`, no en el LXC, y caduca al año. Detalles en la sección 9 del plan.

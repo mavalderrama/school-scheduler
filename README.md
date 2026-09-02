@@ -7,11 +7,13 @@ El diseño completo está en `docs/PLAN.md`; las instrucciones operativas en `CL
 
 ## Puesta en marcha
 
-1. `cp .env.example .env` y completar `TELEGRAM_BOT_TOKEN`, los IDs de Telegram y
-   `CLAUDE_CODE_OAUTH_TOKEN` (generarlo en tu laptop con `claude setup-token`).
+1. `cp .env.example .env` y completar `TELEGRAM_BOT_TOKEN`, los IDs de Telegram,
+   `CLAUDE_CODE_OAUTH_TOKEN` (generarlo en tu laptop con `claude setup-token`),
+   `DJANGO_SECRET_KEY` y las credenciales `DJANGO_SUPERUSER_*` del admin.
 2. `make dev` levanta Postgres y el bot, aplica migraciones y sigue los logs.
 3. `make check-llm` comprueba que el proveedor de LLM configurado responde.
 4. Escribir `/ping` al bot desde un chat en la whitelist: responde `pong`.
+5. Admin de Django en `http://<ip-del-lxc>:8000/admin/` (solo LAN), con el superusuario del `.env`.
 
 ## Cambiar de proveedor de LLM
 
@@ -32,5 +34,9 @@ Si no se usa `claude_sdk`, `BOT_IMAGE_TARGET=base` produce una imagen sin el bin
 
 ```
 make install     # uv sync
-make check       # ruff + mypy + pytest
+make check       # ruff + mypy + migraciones + pytest (levanta un Postgres desechable con Docker)
+make test-unit   # solo los tests que no necesitan Postgres
 ```
+
+Migraciones: los modelos viven en `app/db/models.py`; `make makemigrations` genera la migración
+y `make migrate` la aplica en el contenedor.

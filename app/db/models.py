@@ -1,148 +1,235 @@
-"""Modelo de datos (sección 5 del plan). Principio: nunca borrar, siempre versionar."""
+"""Modelo de datos (sección 5 del plan). Principio: nunca borrar, siempre versionar.
+
+Tablas y columnas coinciden con el SQL del plan (`db_table`, `db_column`). Todas las FK son
+PROTECT porque nada se borra; los enums son TEXT + CHECK, no tipos ENUM de Postgres.
+"""
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from decimal import Decimal
-from typing import Any
-
-from sqlalchemy import (
-    BigInteger,
-    Boolean,
-    CheckConstraint,
-    Date,
-    DateTime,
-    ForeignKey,
-    Index,
-    Integer,
-    Numeric,
-    Text,
-    func,
-)
-from sqlalchemy import text as sa_text
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from django.db import models
+from django.db.models import Q
+from django.db.models.functions import Now
 
 
-class Base(DeclarativeBase):
-    pass
+class UserRole(models.TextChoices):
+    PARENT = "parent", "Padre/madre"
+    ADMIN = "admin", "Administrador"
 
 
-class User(Base):
-    __tablename__ = "users"
-    __table_args__ = (CheckConstraint("role IN ('parent','admin')", name="users_role_check"),)
-
-    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    display_name: Mapped[str] = mapped_column(Text, nullable=False)
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+class SourceKind(models.TextChoices):
+    PHOTO = "photo", "Foto"
+    TEXT_CORRECTION = "text_correction", "Corrección por texto"
+    MANUAL = "manual", "Manual"
 
 
-class Source(Base):
+class SourceStatus(models.TextChoices):
+    PENDING = "pending", "Pendiente"
+    CONFIRMED = "confirmed", "Confirmada"
+    REJECTED = "rejected", "Rechazada"
+    FAILED = "failed", "Fallida"
+
+
+class EntryKind(models.TextChoices):
+    BRING = "bring", "Llevar"
+    HOMEWORK = "homework", "Tarea"
+    EVENT = "event", "Evento"
+    NOTE = "note", "Nota"
+
+
+class MessageRole(models.TextChoices):
+    USER = "user", "Usuario"
+    ASSISTANT = "assistant", "Asistente"
+
+
+class NotificationKind(models.TextChoices):
+    DAILY = "daily", "Diaria"
+    GAP_CHECK = "gap_check", "Chequeo de huecos"
+    NUDGE_EMPTY = "nudge_empty", "Aviso de agenda vacía"
+
+
+class LLMTask(models.TextChoices):
+    VISION = "vision", "Visión"
+    INTENT = "intent", "Intención"
+
+
+class User(models.Model):
+    """Padre o madre en la whitelist. La PK es el id de Telegram."""
+
+    telegram_user_id = models.BigIntegerField(primary_key=True, verbose_name="id de Telegram")
+    display_name = models.TextField(verbose_name="nombre")
+    role = models.TextField(choices=UserRole, verbose_name="rol")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
+
+    class Meta:
+        db_table = "users"
+        verbose_name = "usuario"
+        verbose_name_plural = "usuarios"
+        constraints = [
+            models.CheckConstraint(condition=Q(role__in=UserRole.values), name="users_role_check"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.display_name} ({self.telegram_user_id})"
+
+
+class Source(models.Model):
     """Cada foto, corrección por texto o alta manual."""
 
-    __tablename__ = "sources"
-    __table_args__ = (
-        CheckConstraint("kind IN ('photo','text_correction','manual')", name="sources_kind_check"),
-        CheckConstraint(
-            "status IN ('pending','confirmed','rejected','failed')", name="sources_status_check"
-        ),
+    kind = models.TextField(choices=SourceKind, verbose_name="tipo")
+    telegram_file_id = models.TextField(null=True, blank=True)
+    local_path = models.TextField(null=True, blank=True, verbose_name="ruta local")
+    raw_llm_output = models.JSONField(null=True, blank=True, verbose_name="salida cruda del LLM")
+    llm_provider = models.TextField(null=True, blank=True, verbose_name="proveedor de LLM")
+    submitted_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        db_column="submitted_by",
+        related_name="sources",
+        verbose_name="enviada por",
     )
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    telegram_file_id: Mapped[str | None] = mapped_column(Text)
-    local_path: Mapped[str | None] = mapped_column(Text)
-    raw_llm_output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    llm_provider: Mapped[str | None] = mapped_column(Text)
-    submitted_by: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("users.telegram_user_id")
+    status = models.TextField(
+        choices=SourceStatus,
+        default=SourceStatus.PENDING,
+        db_default=SourceStatus.PENDING,
+        verbose_name="estado",
     )
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa_text("'pending'"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+
+    class Meta:
+        db_table = "sources"
+        verbose_name = "fuente"
+        verbose_name_plural = "fuentes"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(kind__in=SourceKind.values), name="sources_kind_check"
+            ),
+            models.CheckConstraint(
+                condition=Q(status__in=SourceStatus.values), name="sources_status_check"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"#{self.pk} {self.kind} ({self.status})"
+
+
+class AgendaEntry(models.Model):
+    entry_date = models.DateField(verbose_name="fecha")
+    kind = models.TextField(choices=EntryKind, verbose_name="tipo")
+    text = models.TextField(verbose_name="texto")
+    source = models.ForeignKey(
+        Source,
+        on_delete=models.PROTECT,
+        db_column="source_id",
+        related_name="entries",
+        verbose_name="fuente",
     )
-
-
-class AgendaEntry(Base):
-    __tablename__ = "agenda_entries"
-    __table_args__ = (
-        CheckConstraint(
-            "kind IN ('bring','homework','event','note')", name="agenda_entries_kind_check"
-        ),
-        Index(
-            "ix_agenda_entries_entry_date_active",
-            "entry_date",
-            postgresql_where=sa_text("is_active"),
-        ),
+    is_active = models.BooleanField(default=True, db_default=True, verbose_name="vigente")
+    superseded_by = models.ForeignKey(
+        Source,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        db_column="superseded_by",
+        related_name="superseded_entries",
+        verbose_name="reemplazada por",
     )
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    source_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("sources.id"), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa_text("true"))
-    superseded_by: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("sources.id"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    class Meta:
+        db_table = "agenda_entries"
+        verbose_name = "entrada de agenda"
+        verbose_name_plural = "entradas de agenda"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(kind__in=EntryKind.values), name="agenda_entries_kind_check"
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["entry_date"],
+                condition=Q(is_active=True),
+                name="agenda_entry_date_active_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.entry_date} {self.kind}: {self.text[:40]}"
 
 
-class ConversationMessage(Base):
+class ConversationMessage(models.Model):
     """Historial corto por chat para el prompt de intención."""
 
-    __tablename__ = "conversation_messages"
-    __table_args__ = (
-        CheckConstraint("role IN ('user','assistant')", name="conversation_messages_role_check"),
-        Index(
-            "ix_conversation_messages_chat_created",
-            "chat_id",
-            sa_text("created_at DESC"),
-        ),
-    )
+    chat_id = models.BigIntegerField()
+    telegram_user_id = models.BigIntegerField(null=True, blank=True)
+    role = models.TextField(choices=MessageRole, verbose_name="rol")
+    content = models.TextField(verbose_name="contenido")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    class Meta:
+        db_table = "conversation_messages"
+        verbose_name = "mensaje de conversación"
+        verbose_name_plural = "mensajes de conversación"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(role__in=MessageRole.values),
+                name="conversation_messages_role_check",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["chat_id", "-created_at"], name="conv_msg_chat_created_idx"),
+        ]
 
-
-class NotificationLog(Base):
-    __tablename__ = "notifications_log"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'daily' | 'gap_check' | 'nudge_empty'
-    target_date: Mapped[date | None] = mapped_column(Date)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    error: Mapped[str | None] = mapped_column(Text)
+    def __str__(self) -> str:
+        return f"{self.chat_id} {self.role}: {self.content[:40]}"
 
 
-class LLMCall(Base):
+class NotificationLog(models.Model):
+    """Registro de envíos. Idempotencia: un solo envío ok por (kind, target_date, chat_id)."""
+
+    kind = models.TextField(choices=NotificationKind, verbose_name="tipo")
+    target_date = models.DateField(null=True, blank=True, verbose_name="fecha objetivo")
+    chat_id = models.BigIntegerField()
+    sent_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="enviada")
+    ok = models.BooleanField()
+    error = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "notifications_log"
+        verbose_name = "notificación"
+        verbose_name_plural = "notificaciones"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["kind", "target_date", "chat_id"],
+                condition=Q(ok=True),
+                nulls_distinct=False,
+                name="notif_log_ok_unique",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.kind} {self.target_date} -> {self.chat_id} ({'ok' if self.ok else 'error'})"
+
+
+class LLMCall(models.Model):
     """Consumo por proveedor, para vigilar cuota y costo."""
 
-    __tablename__ = "llm_calls"
+    provider = models.TextField(verbose_name="proveedor")
+    task = models.TextField(choices=LLMTask, verbose_name="tarea")
+    model = models.TextField(null=True, blank=True, verbose_name="modelo")
+    input_tokens = models.IntegerField(null=True, blank=True)
+    output_tokens = models.IntegerField(null=True, blank=True)
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, null=True, blank=True)
+    duration_ms = models.IntegerField(null=True, blank=True)
+    ok = models.BooleanField()
+    error = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    provider: Mapped[str] = mapped_column(Text, nullable=False)
-    task: Mapped[str] = mapped_column(Text, nullable=False)  # 'vision' | 'intent'
-    model: Mapped[str | None] = mapped_column(Text)
-    input_tokens: Mapped[int | None] = mapped_column(Integer)
-    output_tokens: Mapped[int | None] = mapped_column(Integer)
-    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
-    duration_ms: Mapped[int | None] = mapped_column(Integer)
-    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    class Meta:
+        db_table = "llm_calls"
+        verbose_name = "llamada al LLM"
+        verbose_name_plural = "llamadas al LLM"
+
+    def __str__(self) -> str:
+        return f"{self.provider}/{self.task} ({'ok' if self.ok else 'error'})"

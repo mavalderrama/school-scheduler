@@ -1,12 +1,14 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # PostgreSQL 18 con la extensión pgvector. Desde la imagen 18 el volumen va en
+    # /var/lib/postgresql (no en /var/lib/postgresql/data).
+    image: pgvector/pgvector:0.8.6-pg18-trixie
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-agenda}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agenda}
       POSTGRES_DB: ${POSTGRES_DB:-agenda}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agenda} -d ${POSTGRES_DB:-agenda}"]
       interval: 5s
@@ -23,11 +25,15 @@ services:
       DATA_DIR: /data
     volumes:
       - ./data:/data
+    # El único puerto publicado es el admin de Django, y solo en la LAN (ADMIN_BIND).
+    # Nunca hacer port-forward de este puerto hacia internet.
+    ports:
+      - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_PORT:-8000}:${ADMIN_PORT:-8000}"
     depends_on:
       postgres:
         condition: service_healthy
-    # Migra y arranca. El bot no publica puertos: solo tráfico saliente.
-    command: sh -c "alembic upgrade head && python -m app.main"
+    # Migra y arranca (bot + scheduler + admin en un solo proceso).
+    command: sh -c "python manage.py migrate --noinput && python -m app.main"
     restart: unless-stopped
 
 volumes:

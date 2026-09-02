@@ -28,13 +28,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
-COPY alembic ./alembic
-COPY alembic.ini ./
+COPY manage.py ./
 COPY scripts ./scripts
 COPY tests/fixtures ./tests/fixtures
 RUN chown -R bot:bot /srv/app
 
 USER bot
+# Admin de Django (solo LAN); el bot en sí no necesita puertos.
+EXPOSE 8000
 CMD ["python", "-m", "app.main"]
 
 

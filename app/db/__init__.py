@@ -1,1 +1,1 @@
-"""Acceso a datos: modelos SQLAlchemy, sesión async y repositorio de queries."""
+"""Acceso a datos: app Django `agenda` (modelos, admin, migraciones) y repositorio de queries."""
