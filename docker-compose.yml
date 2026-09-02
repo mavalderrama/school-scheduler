@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agenda}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agenda}
+      POSTGRES_DB: ${POSTGRES_DB:-agenda}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agenda} -d ${POSTGRES_DB:-agenda}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      target: ${BOT_IMAGE_TARGET:-with-claude}
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Migra y arranca. El bot no publica puertos: solo tráfico saliente.
+    command: sh -c "alembic upgrade head && python -m app.main"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
