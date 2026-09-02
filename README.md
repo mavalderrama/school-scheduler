@@ -15,6 +15,18 @@ El diseño completo está en `docs/PLAN.md`; las instrucciones operativas en `CL
 4. Escribir `/ping` al bot desde un chat en la whitelist: responde `pong`.
 5. Admin de Django en `http://<ip-del-lxc>:8000/admin/` (solo LAN), con el superusuario del `.env`.
 
+## Uso
+
+Manda una **foto** de la agenda y el bot muestra lo que entendió antes de guardar nada
+(✅ Confirmar / ✏️ Corregir / ❌ Descartar). También entiende texto:
+
+- «¿qué hay mañana?», «¿qué lleva el viernes?», «¿qué hay esta semana?»
+- «agrega que el martes lleva disfraz» · «quita lo del jueves» (ambas piden confirmación)
+
+Comandos, que funcionan aunque la IA esté caída: `/hoy` `/manana` `/semana` `/pendiente`
+`/ayuda` `/ping`. Cada tarde a las 19:00 avisa lo de mañana; los domingos, los días de la
+próxima semana sin agenda.
+
 ## Cambiar de proveedor de LLM
 
 Solo variables de entorno, sin tocar código:

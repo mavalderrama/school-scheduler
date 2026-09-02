@@ -13,7 +13,7 @@ from app.llm.compose import format_extraction
 from app.llm.provider import LLMProviders
 from app.log import get_logger
 from app.services import ingest
-from app.services.confirm import Pending, PendingStore, QueuedPhoto
+from app.services.confirm import PendingPhoto, PendingStore, QueuedPhoto
 
 log = get_logger(__name__)
 router = Router(name="photo")
@@ -52,7 +52,7 @@ async def start_ingest(
         format_extraction(result.extraction), reply_markup=confirmation_keyboard(result.source_id)
     )
     pending.set(
-        Pending(
+        PendingPhoto(
             source_id=result.source_id,
             chat_id=chat_id,
             extraction=result.extraction,

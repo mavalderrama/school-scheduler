@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import html
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date
+from typing import Protocol
 
 from app.llm.prompting import weekday_es
 from app.llm.schemas import ExtractedEntry, ExtractionResult
@@ -72,6 +73,88 @@ def format_extraction(extraction: ExtractionResult) -> str:
     lines.append("")
     lines.append("¿Lo guardo?" if extraction.entries else "¿Descarto la foto o me corriges?")
     return "\n".join(lines)
+
+
+class AgendaLike(Protocol):
+    """Lo mínimo que compose necesita de una entrada guardada.
+
+    Es un Protocol para que `app/llm/` no dependa de los modelos de Django.
+    """
+
+    entry_date: date
+    kind: str
+    text: str
+
+
+def stored_line(entry: AgendaLike) -> str:
+    emoji, label = KIND_LABELS[entry.kind]
+    return f"{emoji} {label}: {html.escape(entry.text)}"
+
+
+def format_agenda(entries: Sequence[AgendaLike], *, title: str, empty: str) -> str:
+    """Entradas vigentes agrupadas por día. Sin LLM: plantilla determinista."""
+    if not entries:
+        return empty
+    grouped: dict[date, list[AgendaLike]] = {}
+    for entry in sorted(entries, key=lambda e: (e.entry_date, e.kind)):
+        grouped.setdefault(entry.entry_date, []).append(entry)
+
+    lines = [title]
+    for day, day_entries in grouped.items():
+        lines.append("")
+        lines.append(f"<b>{format_date_es(day)}</b>")
+        lines.extend(stored_line(e) for e in day_entries)
+    return "\n".join(lines)
+
+
+def describe_entry(entry: AgendaLike) -> str:
+    """Una línea para confirmaciones y listas de candidatas."""
+    _, label = KIND_LABELS[entry.kind]
+    return f"{label.lower()} «{html.escape(entry.text)}» del {format_date_es(entry.entry_date)}"
+
+
+def format_add_question(entry_date: date, kind: str, text: str) -> str:
+    _, label = KIND_LABELS[kind]
+    return f"¿Agrego {label.lower()} «{html.escape(text)}» para el {format_date_es(entry_date)}?"
+
+
+def format_remove_question(entry: AgendaLike) -> str:
+    return f"¿Quito {describe_entry(entry)}?"
+
+
+def format_added(entry: AgendaLike) -> str:
+    return f"✅ Agregado: {describe_entry(entry)}."
+
+
+def format_removed(entry: AgendaLike) -> str:
+    return f"✅ Quitado: {describe_entry(entry)}."
+
+
+def format_candidates(entries: Sequence[AgendaLike]) -> str:
+    lines = ["Encontré varias. ¿Cuál quito?"]
+    lines.extend(f"• {describe_entry(e)}" for e in entries)
+    return "\n".join(lines)
+
+
+HELP_TEXT = (
+    "📚 <b>Bot de la agenda escolar</b>\n"
+    "\n"
+    "Mándame una <b>foto</b> de la agenda y te digo qué entendí antes de guardar nada.\n"
+    "\n"
+    "También puedes escribirme normal:\n"
+    "• «¿qué hay mañana?» o «¿qué lleva el viernes?»\n"
+    "• «¿qué hay esta semana?»\n"
+    "• «agrega que el martes lleva disfraz»\n"
+    "• «quita lo del jueves»\n"
+    "\n"
+    "Comandos (funcionan aunque la IA esté caída):\n"
+    "/hoy · /manana · /semana · /pendiente · /ayuda · /ping"
+)
+
+NO_LLM_TEXT = (
+    "⚠️ No puedo interpretar texto ahora mismo (el proveedor de IA no responde). "
+    "Usa /hoy, /manana o /semana."
+)
 
 
 def format_applied(dates: list[date], inserted: int, superseded: int) -> str:

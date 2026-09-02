@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.llm.prompts import load_prompt
-from app.llm.schemas import ExtractionResult
+from app.llm.schemas import ChatTurn, ExtractionResult
 
 WEEKDAYS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -31,4 +31,25 @@ def correction_prompt(extraction: ExtractionResult, correction: str, today: date
         tz=tz,
         extraction_json=extraction.model_dump_json(indent=2),
         correction=correction.strip(),
+    )
+
+
+def format_history(history: list[ChatTurn]) -> str:
+    """Historial corto para el prompt de intención. Vacío = una marca explícita."""
+    if not history:
+        return "(sin turnos previos)"
+    labels = {"user": "Usuario", "assistant": "Bot"}
+    return "\n".join(f"{labels[turn.role]}: {turn.content.strip()}" for turn in history)
+
+
+def intent_prompt(
+    text: str, history: list[ChatTurn], today: date, has_pending: bool, tz: str
+) -> str:
+    return load_prompt("classify_intent").format(
+        today=today.isoformat(),
+        weekday=weekday_es(today),
+        tz=tz,
+        has_pending="sí" if has_pending else "no",
+        history=format_history(history),
+        text=text.strip(),
     )

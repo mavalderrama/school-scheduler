@@ -19,10 +19,11 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections, transaction
-from django.db.models import F
+from django.db.models import F, Q
 
 from app.db.models import (
     AgendaEntry,
+    ConversationMessage,
     LLMCacheEntry,
     LLMCall,
     NotificationKind,
@@ -33,7 +34,7 @@ from app.db.models import (
     User,
     UserRole,
 )
-from app.llm.schemas import ExtractedEntry, LLMUsage
+from app.llm.schemas import ChatTurn, ExtractedEntry, LLMUsage
 
 # --- Arranque y conexiones ---------------------------------------------------------
 
@@ -72,6 +73,10 @@ async def upsert_user(telegram_user_id: int, display_name: str) -> User:
         create_defaults={"display_name": display_name, "role": UserRole.PARENT},
     )
     return user
+
+
+async def get_user(telegram_user_id: int) -> User | None:
+    return await User.objects.filter(telegram_user_id=telegram_user_id).afirst()
 
 
 async def create_source(
@@ -159,6 +164,79 @@ async def active_dates(date_from: date, date_to: date) -> set[date]:
         .distinct()
     )
     return {day async for day in qs}
+
+
+def _add_single_entry(source_id: int, entry: ExtractedEntry) -> AgendaEntry:
+    """Alta por texto: inserta UNA entrada sin tocar las demás de esa fecha.
+
+    A diferencia de una foto (que reemplaza el día entero), agregar por texto es aditivo.
+    """
+    with transaction.atomic():
+        source = Source.objects.select_for_update().get(pk=source_id)
+        created = AgendaEntry.objects.create(
+            entry_date=entry.entry_date, kind=entry.kind, text=entry.text, source=source
+        )
+        source.status = SourceStatus.CONFIRMED
+        source.save(update_fields=["status"])
+        return created
+
+
+async def add_single_entry(source_id: int, entry: ExtractedEntry) -> AgendaEntry:
+    return await sync_to_async(_add_single_entry)(source_id, entry)
+
+
+def _deactivate_entry(entry_id: int, source_id: int) -> bool:
+    """Baja por texto: desactiva solo esa entrada, referenciando la source que la quitó."""
+    with transaction.atomic():
+        source = Source.objects.select_for_update().get(pk=source_id)
+        updated = AgendaEntry.objects.filter(pk=entry_id, is_active=True).update(
+            is_active=False, superseded_by=source
+        )
+        source.status = SourceStatus.CONFIRMED
+        source.save(update_fields=["status"])
+        return bool(updated)
+
+
+async def deactivate_entry(entry_id: int, source_id: int) -> bool:
+    return await sync_to_async(_deactivate_entry)(entry_id, source_id)
+
+
+async def find_active_entries(
+    date_from: date, date_to: date, hint: str | None = None
+) -> list[AgendaEntry]:
+    """Candidatas a borrar: vigentes en el rango, filtradas por texto si hay pista."""
+    qs = AgendaEntry.objects.filter(
+        is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
+    )
+    if hint:
+        # Palabras de 4+ letras de la pista; ILIKE por cada una (OR).
+        words = [w for w in hint.split() if len(w) >= 4]
+        if words:
+            matches = Q()
+            for word in words:
+                matches |= Q(text__icontains=word)
+            qs = qs.filter(matches)
+    return [entry async for entry in qs.order_by("entry_date", "kind", "id")]
+
+
+async def get_entry(entry_id: int) -> AgendaEntry | None:
+    return await AgendaEntry.objects.filter(pk=entry_id).afirst()
+
+
+# --- Historial de conversación ------------------------------------------------------------
+
+
+async def save_message(chat_id: int, telegram_user_id: int | None, role: str, content: str) -> None:
+    await ConversationMessage.objects.acreate(
+        chat_id=chat_id, telegram_user_id=telegram_user_id, role=role, content=content
+    )
+
+
+async def recent_history(chat_id: int, limit: int = 6) -> list[ChatTurn]:
+    """Últimos turnos del chat, del más antiguo al más reciente (como los lee el prompt)."""
+    qs = ConversationMessage.objects.filter(chat_id=chat_id).order_by("-created_at", "-id")[:limit]
+    rows = [row async for row in qs]
+    return [ChatTurn(role=row.role, content=row.content) for row in reversed(rows)]
 
 
 # --- Notificaciones ---------------------------------------------------------------------

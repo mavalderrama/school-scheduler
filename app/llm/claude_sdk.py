@@ -25,7 +25,7 @@ from claude_agent_sdk import (
 
 from app.config import Settings
 from app.llm.json_out import validate_with_retry
-from app.llm.prompting import correction_prompt, extraction_prompt
+from app.llm.prompting import correction_prompt, extraction_prompt, intent_prompt
 from app.llm.prompts import load_prompt
 from app.llm.provider import LLMOutputError, LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, OkProbe, ProviderHealth
@@ -202,7 +202,19 @@ class ClaudeSDKProvider:
         today: date,
         has_pending: bool,
     ) -> Intent:
-        raise NotImplementedError("Fase 3")
+        """Texto: ninguna herramienta. El mensaje del usuario es entrada no confiable."""
+        prompt = intent_prompt(text, history, today, has_pending, self._tz)
+
+        async def call(hint: str | None) -> dict[str, Any]:
+            data, _ = await self._run_json(
+                prompt + (hint or ""),
+                tools=[],
+                schema=Intent.model_json_schema(),
+                max_turns=1,
+            )
+            return data
+
+        return await validate_with_retry(Intent, call, provider=self.name)
 
     async def healthcheck(self) -> ProviderHealth:
         """Llamada real mínima: verifica token, arranque del subproceso y salida JSON."""

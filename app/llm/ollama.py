@@ -14,7 +14,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 
 from app.config import Settings
 from app.llm.json_out import validate_with_retry
-from app.llm.prompting import correction_prompt, extraction_prompt
+from app.llm.prompting import correction_prompt, extraction_prompt, intent_prompt
 from app.llm.provider import LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, ProviderHealth
 
@@ -119,7 +119,13 @@ class OllamaProvider:
         today: date,
         has_pending: bool,
     ) -> Intent:
-        raise NotImplementedError("Fase 3")
+        prompt = intent_prompt(text, history, today, has_pending, self._tz)
+        schema = Intent.model_json_schema()
+
+        async def call(hint: str | None) -> str:
+            return await self._chat_json(self.text_model, prompt + (hint or ""), schema)
+
+        return await validate_with_retry(Intent, call, provider=self.name)
 
     async def healthcheck(self) -> ProviderHealth:
         """Comprueba que Ollama responde y que los dos modelos configurados están descargados."""

@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import date
 
 from app.db import repo
-from app.db.models import SourceStatus
-from app.llm.schemas import ExtractionResult
+from app.db.models import AgendaEntry, SourceKind, SourceStatus
+from app.llm.schemas import ExtractedEntry, ExtractionResult
 from app.log import get_logger
 from app.services import cache
 
@@ -34,6 +34,29 @@ async def apply_source(source_id: int, extraction: ExtractionResult) -> ApplyRes
         superseded=superseded,
     )
     return ApplyResult(source_id=source_id, dates=dates, inserted=inserted, superseded=superseded)
+
+
+async def add_entry(
+    entry_date: date, kind: str, text: str, user_id: int | None = None
+) -> AgendaEntry:
+    """Alta por texto: source `text_correction` + UNA entrada, sin tocar el resto del día."""
+    user = await repo.get_user(user_id) if user_id is not None else None
+    source = await repo.create_source(SourceKind.TEXT_CORRECTION, submitted_by=user)
+    entry = await repo.add_single_entry(
+        source.pk,
+        ExtractedEntry(entry_date=entry_date, kind=kind, text=text, confidence="high"),
+    )
+    log.info("entry_added", entry_id=entry.pk, source_id=source.pk, date=entry_date.isoformat())
+    return entry
+
+
+async def remove_entry(entry_id: int, user_id: int | None = None) -> bool:
+    """Baja por texto: desactiva solo esa entrada, con `superseded_by` a la nueva source."""
+    user = await repo.get_user(user_id) if user_id is not None else None
+    source = await repo.create_source(SourceKind.TEXT_CORRECTION, submitted_by=user)
+    removed = await repo.deactivate_entry(entry_id, source.pk)
+    log.info("entry_removed", entry_id=entry_id, source_id=source.pk, removed=removed)
+    return removed
 
 
 async def reject_source(source_id: int) -> None:
