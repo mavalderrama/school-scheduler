@@ -71,7 +71,7 @@ async def run(settings: Settings) -> None:
     dp.include_router(text.router)
 
     scheduler = build_scheduler(settings)
-    register_jobs(scheduler, settings)
+    register_jobs(scheduler, settings, bot)
     scheduler.start()
 
     server = build_admin_server(settings) if settings.admin_enabled else None

@@ -11,6 +11,7 @@ Convención con el ORM async de Django:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -22,6 +23,8 @@ from django.db import close_old_connections, connection, connections, transactio
 from app.db.models import (
     AgendaEntry,
     LLMCall,
+    NotificationKind,
+    NotificationLog,
     Source,
     SourceKind,
     SourceStatus,
@@ -142,6 +145,45 @@ async def active_entries(date_from: date, date_to: date) -> list[AgendaEntry]:
 async def entries_for_source(source_id: int) -> list[AgendaEntry]:
     qs = AgendaEntry.objects.filter(source_id=source_id).order_by("entry_date", "id")
     return [entry async for entry in qs]
+
+
+async def active_dates(date_from: date, date_to: date) -> set[date]:
+    """Fechas de [date_from, date_to] con al menos una entrada vigente."""
+    qs = (
+        AgendaEntry.objects.filter(
+            is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
+        )
+        .values_list("entry_date", flat=True)
+        .distinct()
+    )
+    return {day async for day in qs}
+
+
+# --- Notificaciones ---------------------------------------------------------------------
+
+
+async def notification_sent_ok(
+    kinds: Sequence[NotificationKind], target_date: date, chat_id: int
+) -> bool:
+    """True si ya hubo un envío correcto de alguno de esos tipos para esa fecha y chat."""
+    return await NotificationLog.objects.filter(
+        kind__in=list(kinds), target_date=target_date, chat_id=chat_id, ok=True
+    ).aexists()
+
+
+async def log_notification(
+    kind: NotificationKind, target_date: date, chat_id: int, *, ok: bool, error: str | None
+) -> None:
+    await NotificationLog.objects.acreate(
+        kind=kind, target_date=target_date, chat_id=chat_id, ok=ok, error=error
+    )
+
+
+async def notifications(kind: NotificationKind | None = None) -> list[NotificationLog]:
+    qs = NotificationLog.objects.order_by("id")
+    if kind is not None:
+        qs = qs.filter(kind=kind)
+    return [row async for row in qs]
 
 
 # --- Consumo de LLM ---------------------------------------------------------------------
