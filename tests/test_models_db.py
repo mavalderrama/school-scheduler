@@ -6,7 +6,11 @@ conexión) que la transacción que pytest-django abriría por defecto.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from datetime import date
+from pathlib import Path
 
 import pytest
 from django.db import IntegrityError
@@ -85,3 +89,40 @@ async def test_notification_log_is_idempotent_only_for_ok_sends() -> None:
 async def test_ensure_superuser_is_idempotent() -> None:
     assert await repo.ensure_superuser("admin", "secret", "a@b.c") is True
     assert await repo.ensure_superuser("admin", "other", "a@b.c") is False
+
+
+def test_check_connection_from_a_fresh_process() -> None:
+    """Regresión del arranque: proceso nuevo, sin conexión previa, llamada desde el loop.
+
+    `sync_to_async(connection.ensure_connection)` resolvía el método en el hilo del event
+    loop y lo ejecutaba en el de trabajo; Django aborta con "DatabaseWrapper objects
+    created in a thread can only be used in that same thread" y el bot no arrancaba.
+
+    Hay que hacerlo en un proceso aparte: dentro de pytest el wrapper ya tiene conexión,
+    así que `ensure_connection` sale antes de llegar a `connect()`, que es donde Django
+    valida el hilo, y el fallo no aparece.
+    """
+    script = textwrap.dedent(
+        """
+        import asyncio, os, sys
+        os.environ["DJANGO_SETTINGS_MODULE"] = "tests.django_settings_test"
+        from app.django_bootstrap import setup_django
+        setup_django()
+        from app.db import repo
+        asyncio.run(repo.check_connection())
+        print("ok")
+        """
+    )
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=root, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert "ok" in result.stdout
+
+
+async def test_connection_helpers_are_callable_from_the_loop() -> None:
+    """`close_old` y `close_all` se llaman desde el loop (middleware, jobs, apagado)."""
+    await repo.close_old()
+    await repo.close_all()
+    await repo.check_connection()

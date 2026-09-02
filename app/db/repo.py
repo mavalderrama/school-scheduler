@@ -39,18 +39,37 @@ from app.llm.schemas import ChatTurn, ExtractedEntry, LLMUsage
 # --- Arranque y conexiones ---------------------------------------------------------
 
 
+def _ensure_connection() -> None:
+    connection.ensure_connection()
+
+
 async def check_connection() -> None:
-    """Falla rápido en arranque si Postgres no responde."""
-    await sync_to_async(connection.ensure_connection)()
+    """Falla rápido en arranque si Postgres no responde.
+
+    Ojo con el envoltorio: `connection` es un proxy thread-local, así que pasar
+    `sync_to_async(connection.ensure_connection)` resolvería el método **en el hilo del
+    event loop** y lo ejecutaría en el hilo de trabajo, con lo que Django aborta con
+    "DatabaseWrapper objects created in a thread can only be used in that same thread".
+    Por eso el acceso va dentro de una función que se resuelve ya en el hilo correcto.
+    """
+    await sync_to_async(_ensure_connection)()
+
+
+def _close_old_connections() -> None:
+    close_old_connections()
 
 
 async def close_old() -> None:
     """Cierra conexiones obsoletas del hilo actual (por update y por job)."""
-    await sync_to_async(close_old_connections)()
+    await sync_to_async(_close_old_connections)()
+
+
+def _close_all_connections() -> None:
+    connections.close_all()
 
 
 async def close_all() -> None:
-    await sync_to_async(connections.close_all)()
+    await sync_to_async(_close_all_connections)()
 
 
 async def ensure_superuser(username: str, password: str, email: str = "") -> bool:
