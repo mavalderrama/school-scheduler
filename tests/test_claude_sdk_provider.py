@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import date
 from typing import Any
 
 import pytest
@@ -12,7 +13,7 @@ from app.config import Settings
 from app.llm import claude_sdk
 from app.llm.claude_sdk import DISALLOWED_TOOLS, ClaudeSDKProvider
 from app.llm.provider import LLMOutputError, LLMQuotaError, LLMUnavailableError
-from app.llm.schemas import OkProbe
+from app.llm.schemas import ExtractionResult, OkProbe, QAPair
 
 
 def _result(**overrides: Any) -> ResultMessage:
@@ -49,6 +50,9 @@ class QuerySpy:
             raise self.raises
         for m in self.messages:
             yield m
+
+
+TODAY = date(2026, 9, 2)
 
 
 @pytest.fixture
@@ -121,3 +125,33 @@ async def test_healthcheck_never_raises(settings: Settings, spy: QuerySpy) -> No
     spy.raises = RuntimeError("boom")
     health = await ClaudeSDKProvider(settings).healthcheck()
     assert not health.ok and "boom" in health.detail
+
+
+async def test_text_tasks_are_not_capped_at_one_turn(settings: Settings, spy: QuerySpy) -> None:
+    """Regresión: `refine_extraction` fallaba a ratos con `error_max_turns`.
+
+    Las tareas de texto estaban fijadas a `max_turns=1`, así que `CLAUDE_SDK_MAX_TURNS` no
+    se aplicaba a ninguna salvo la de visión. Con salida estructurada el modelo a veces
+    necesita un turno más, y el refinado —que lleva la extracción entera en el prompt— era
+    el que más lo notaba: fallaba de forma intermitente contra la misma foto.
+    """
+    provider = ClaudeSDKProvider(settings.model_copy(update={"claude_sdk_max_turns": 4}))
+    extraction = ExtractionResult(entries=[], doubts=[], detected_language="es")
+
+    spy.messages = [_result(structured_output=extraction.model_dump(mode="json"))]
+    await provider.refine_extraction(extraction, [QAPair(question="q", answer="r")], TODAY)
+    assert spy.options is not None and spy.options.max_turns == 4
+
+    await provider.correct_extraction(extraction, "cambia el jueves", TODAY)
+    assert spy.options is not None and spy.options.max_turns == 4
+
+    spy.messages = [_result(structured_output={"action": "help"})]
+    await provider.classify_intent("hola", [], TODAY, False)
+    assert spy.options is not None and spy.options.max_turns == 4
+
+
+async def test_the_healthcheck_stays_at_one_turn(settings: Settings, spy: QuerySpy) -> None:
+    """Si la sonda de conectividad no responde a la primera, algo va mal de verdad."""
+    provider = ClaudeSDKProvider(settings.model_copy(update={"claude_sdk_max_turns": 4}))
+    await provider.healthcheck()
+    assert spy.options is not None and spy.options.max_turns == 1

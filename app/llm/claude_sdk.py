@@ -131,6 +131,11 @@ class ClaudeSDKProvider:
 
     # --- Llamada base ---------------------------------------------------------------
 
+    # Las tareas de texto no llevan `max_turns` explícito: usan `CLAUDE_SDK_MAX_TURNS`.
+    # Estuvieron fijadas a 1 y con eso `refine_extraction` fallaba de forma intermitente con
+    # `error_max_turns`: con salida estructurada el modelo a veces necesita un turno más,
+    # y cuanto más largo es el prompt (el refinado lleva la extracción entera dentro) más
+    # probable es. El healthcheck sí se queda en 1: si no responde a la primera, está mal.
     async def _run_json(
         self,
         prompt: str,
@@ -205,7 +210,6 @@ class ClaudeSDKProvider:
                 prompt + (hint or ""),
                 tools=[],
                 schema=ExtractionResult.model_json_schema(),
-                max_turns=1,
             )
             return data
 
@@ -221,7 +225,6 @@ class ClaudeSDKProvider:
                 prompt + (hint or ""),
                 tools=[],
                 schema=ExtractionResult.model_json_schema(),
-                max_turns=1,
             )
             return data
 
@@ -242,7 +245,6 @@ class ClaudeSDKProvider:
                 prompt + (hint or ""),
                 tools=[],
                 schema=Intent.model_json_schema(),
-                max_turns=1,
             )
             return data
 
