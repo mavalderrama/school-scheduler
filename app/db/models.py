@@ -264,6 +264,10 @@ class LLMCall(models.Model):
     duration_ms = models.IntegerField(null=True, blank=True)
     ok = models.BooleanField()
     error = models.TextField(null=True, blank=True)
+    # Traza: qué se le mandó y qué contestó. Es lo único que no se podía ver cuando algo
+    # salía raro; las métricas de arriba solo dicen que falló, no por qué.
+    prompt = models.TextField(null=True, blank=True, verbose_name="prompt enviado")
+    response = models.JSONField(null=True, blank=True, verbose_name="respuesta cruda")
     created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
 
     class Meta:

@@ -11,8 +11,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
+from app import obs
 from app.config import ProviderName, Settings
 from app.llm.schemas import ChatTurn, ExtractionResult, Intent, LLMUsage, ProviderHealth, QAPair
 from app.log import get_logger
@@ -50,10 +51,15 @@ class LLMProvider(Protocol):
 
     `last_usage` guarda el consumo de la última llamada; `FallbackProvider` lo lee bajo
     un lock justo después de cada llamada para registrarlo en `llm_calls`.
+
+    `last_prompt` y `last_response` son la traza: qué se mandó y qué contestó el modelo,
+    tal cual, incluso cuando el JSON no valida. Se leen igual que `last_usage`.
     """
 
     name: str
     last_usage: LLMUsage | None
+    last_prompt: str | None
+    last_response: dict[str, Any] | None
 
     async def extract_from_image(
         self, image_path: Path, today: date, note: str | None = None
@@ -105,6 +111,8 @@ class LLMAttempt:
     usage: LLMUsage | None
     duration_ms: int
     exception: LLMError | None = None
+    prompt: str | None = None
+    response: dict[str, Any] | None = None
 
 
 @dataclass
@@ -152,6 +160,20 @@ class FallbackProvider:
         loop = asyncio.get_running_loop()
         started = loop.time()
         provider.last_usage = None
+        provider.last_prompt = None
+        provider.last_response = None
+        # Un span por intento: es el único punto por el que pasan todas las llamadas.
+        with obs.llm_span(self.task, provider.name, getattr(provider, "model", None)) as span:
+            return await self._attempt_inner(provider, call, span, started, loop)
+
+    async def _attempt_inner[T](
+        self,
+        provider: LLMProvider,
+        call: Callable[[LLMProvider], Awaitable[T]],
+        span: object,
+        started: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> tuple[T | None, LLMAttempt]:
         try:
             async with asyncio.timeout(self.timeout_s):
                 value = await call(provider)
@@ -162,11 +184,29 @@ class FallbackProvider:
                 if isinstance(exc, TimeoutError)
                 else exc
             )
+            obs.record_usage(span, provider.last_usage, ok=False, error=str(error))
             return None, LLMAttempt(
-                provider.name, False, str(error), provider.last_usage, duration, error
+                provider.name,
+                False,
+                str(error),
+                provider.last_usage,
+                duration,
+                error,
+                provider.last_prompt,
+                provider.last_response,
             )
         duration = int((loop.time() - started) * 1000)
-        return value, LLMAttempt(provider.name, True, None, provider.last_usage, duration)
+        obs.record_usage(span, provider.last_usage, ok=True, error=None)
+        return value, LLMAttempt(
+            provider.name,
+            True,
+            None,
+            provider.last_usage,
+            duration,
+            None,
+            provider.last_prompt,
+            provider.last_response,
+        )
 
     async def run[T](
         self,

@@ -379,6 +379,8 @@ async def log_llm_call(
     usage: LLMUsage | None,
     duration_ms: int,
     model: str | None = None,
+    prompt: str | None = None,
+    response: dict[str, Any] | None = None,
 ) -> None:
     await LLMCall.objects.acreate(
         provider=provider,
@@ -392,6 +394,8 @@ async def log_llm_call(
         duration_ms=usage.duration_ms if usage else duration_ms,
         ok=ok,
         error=error,
+        prompt=prompt,
+        response=response,
     )
 
 
@@ -646,3 +650,13 @@ async def add_calendar_exception(day: date, kind: str, label: str) -> CalendarEx
         day=day, defaults={"kind": kind, "label": label}
     )
     return row
+
+
+async def purge_llm_traces(before: datetime) -> int:
+    """Vacía prompt y respuesta de las llamadas viejas; la fila y las métricas se quedan.
+
+    Mismo criterio que con las fotos: se borra el material pesado, no la auditoría.
+    """
+    return await LLMCall.objects.filter(created_at__lt=before, prompt__isnull=False).aupdate(
+        prompt=None, response=None
+    )

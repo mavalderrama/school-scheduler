@@ -161,6 +161,8 @@ async def classify(
                 error=attempt.error,
                 usage=attempt.usage,
                 duration_ms=attempt.duration_ms,
+                prompt=attempt.prompt if settings.llm_trace_enabled else None,
+                response=attempt.response if settings.llm_trace_enabled else None,
             )
         raise
     for attempt in run.attempts:
@@ -171,6 +173,8 @@ async def classify(
             error=attempt.error,
             usage=attempt.usage,
             duration_ms=attempt.duration_ms,
+            prompt=attempt.prompt if settings.llm_trace_enabled else None,
+            response=attempt.response if settings.llm_trace_enabled else None,
         )
     model = next(
         (a.usage.model for a in reversed(run.attempts) if a.ok and a.usage is not None), None

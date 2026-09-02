@@ -66,9 +66,12 @@ class AnthropicAPIProvider:
             max_retries=2,
         )
         self.last_usage: LLMUsage | None = None
+        self.last_prompt: str | None = None
+        self.last_response: dict[str, Any] | None = None
 
     async def _emit_json(self, content: Any, schema: dict[str, Any]) -> dict[str, Any]:
         """Una llamada a Messages forzando la herramienta `emit`; devuelve su input."""
+        self.last_prompt = _text_of(content)
         started = time.monotonic()
         try:
             response = await self._client.messages.create(
@@ -108,7 +111,9 @@ class AnthropicAPIProvider:
         )
         for block in response.content:
             if block.type == "tool_use" and block.name == "emit" and isinstance(block.input, dict):
+                self.last_response = block.input
                 return block.input
+        self.last_response = {"stop_reason": str(response.stop_reason)}
         raise LLMOutputError(
             f"anthropic_api: sin tool_use en la respuesta ({response.stop_reason})"
         )
@@ -194,3 +199,11 @@ class AnthropicAPIProvider:
             model=info.id,
             latency_ms=latency,
         )
+
+
+def _text_of(content: Any) -> str:
+    """Solo la parte de texto de un contenido multimodal: la imagen no va a la traza."""
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
+        return "\n".join(parts)
+    return str(content)

@@ -62,7 +62,7 @@ def _model_of(attempts: list[LLMAttempt]) -> str | None:
     return None
 
 
-async def _log_attempts(task: str, attempts: list[LLMAttempt]) -> None:
+async def _log_attempts(task: str, attempts: list[LLMAttempt], *, trace: bool = True) -> None:
     for attempt in attempts:
         await repo.log_llm_call(
             task=task,
@@ -71,6 +71,8 @@ async def _log_attempts(task: str, attempts: list[LLMAttempt]) -> None:
             error=attempt.error,
             usage=attempt.usage,
             duration_ms=attempt.duration_ms,
+            prompt=attempt.prompt if trace else None,
+            response=attempt.response if trace else None,
         )
 
 
@@ -132,13 +134,13 @@ async def extract_photo(
         )
     except LLMQuotaError as exc:
         # La source queda `pending` a propósito: `retry_photos_job` la reintenta sola.
-        await _log_attempts("vision", exc.attempts)
+        await _log_attempts("vision", exc.attempts, trace=settings.llm_trace_enabled)
         raise
     except LLMError as exc:
-        await _log_attempts("vision", exc.attempts)
+        await _log_attempts("vision", exc.attempts, trace=settings.llm_trace_enabled)
         await repo.update_source(source_id, status=SourceStatus.FAILED)
         raise
-    await _log_attempts("vision", run.attempts)
+    await _log_attempts("vision", run.attempts, trace=settings.llm_trace_enabled)
     await cache.put(
         key,
         task="vision",
@@ -251,9 +253,9 @@ async def correct_extraction(
             lambda p: p.correct_extraction(extraction, correction, today)
         )
     except LLMError as exc:
-        await _log_attempts("correction", exc.attempts)
+        await _log_attempts("correction", exc.attempts, trace=settings.llm_trace_enabled)
         raise
-    await _log_attempts("correction", run.attempts)
+    await _log_attempts("correction", run.attempts, trace=settings.llm_trace_enabled)
     await cache.put(
         key,
         task="correction",
@@ -346,9 +348,9 @@ async def refine_extraction(
     try:
         run = await providers.text.run(lambda p: p.refine_extraction(extraction, pairs, today))
     except LLMError as exc:
-        await _log_attempts("refine", exc.attempts)
+        await _log_attempts("refine", exc.attempts, trace=settings.llm_trace_enabled)
         raise
-    await _log_attempts("refine", run.attempts)
+    await _log_attempts("refine", run.attempts, trace=settings.llm_trace_enabled)
     await cache.put(
         key,
         task="refine",

@@ -23,6 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 # Solo se instala en el target `with-claude` del Dockerfile.
 claude = ["claude-agent-sdk>=0.2.151"]
+# Trazas OTLP (Langfuse autoalojado y compañía). No hace falta para el funcionamiento.
+otel = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]
 
 [dependency-groups]
 dev = [
@@ -60,7 +62,7 @@ strict = true
 plugins = ["mypy_django_plugin.main", "pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "claude_agent_sdk.*", "pgvector.*"]
+module = ["apscheduler.*", "claude_agent_sdk.*", "pgvector.*", "opentelemetry.*"]
 ignore_missing_imports = true
 
 [tool.django-stubs]

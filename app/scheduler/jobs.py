@@ -126,6 +126,11 @@ async def purge_photos_job(settings: Settings) -> None:
         purged += 1
     log.info("purge_photos_done", purged=purged, retention_days=settings.photo_retention_days)
 
+    # Misma idea con las trazas: se va el material pesado, la fila y las métricas se quedan.
+    traces_before = timezone.now() - timedelta(days=settings.llm_trace_retention_days)
+    cleared = await repo.purge_llm_traces(traces_before)
+    log.info("purge_traces_done", cleared=cleared, retention_days=settings.llm_trace_retention_days)
+
 
 def _hhmm(value: str) -> tuple[int, int]:
     hour, minute = value.split(":")

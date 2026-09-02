@@ -5,10 +5,12 @@ Regla "nunca borrar": ningún modelo permite eliminar desde el admin.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from django.contrib import admin
 from django.http import HttpRequest
+from django.utils.html import format_html
 
 from app.db.models import (
     AgendaEntry,
@@ -106,6 +108,25 @@ class NotificationLogAdmin(ReadOnlyMixin, admin.ModelAdmin[NotificationLog]):
     ordering = ["-id"]
 
 
+TRACE_FIELDS = (
+    "created_at",
+    "provider",
+    "task",
+    "model",
+    "ok",
+    "error",
+    "pretty_prompt",
+    "pretty_response",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cost_usd",
+    "duration_ms",
+)
+"""Detalle de una llamada: la traza primero, que es el motivo de entrar aquí."""
+
+
 @admin.register(LLMCall)
 class LLMCallAdmin(ReadOnlyMixin, admin.ModelAdmin[LLMCall]):
     list_display = [
@@ -123,8 +144,24 @@ class LLMCallAdmin(ReadOnlyMixin, admin.ModelAdmin[LLMCall]):
         "created_at",
     ]
     list_filter = ["provider", "task", "ok"]
-    search_fields = ["model", "error"]
+    search_fields = ["model", "error", "prompt"]
     ordering = ["-id"]
+    # La traza es el motivo de entrar aquí: prompt y respuesta al principio del detalle.
+    fields = TRACE_FIELDS
+    readonly_fields = TRACE_FIELDS
+
+    @admin.display(description="prompt enviado")
+    def pretty_prompt(self, obj: LLMCall) -> str:
+        if not obj.prompt:
+            return "— (sin traza: purgada por retención o desactivada)"
+        return format_html('<pre style="white-space:pre-wrap">{}</pre>', obj.prompt)
+
+    @admin.display(description="respuesta cruda")
+    def pretty_response(self, obj: LLMCall) -> str:
+        if obj.response is None:
+            return "—"
+        body = json.dumps(obj.response, indent=2, ensure_ascii=False)
+        return format_html('<pre style="white-space:pre-wrap">{}</pre>', body)
 
 
 @admin.register(LLMCacheEntry)

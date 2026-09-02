@@ -134,6 +134,13 @@ class Settings(DjangoSettings):
 
     # --- Robustez y operación ---
     photo_retention_days: int = 90
+    # Traza de las llamadas al LLM: prompt y respuesta cruda en `llm_calls`.
+    llm_trace_enabled: bool = True
+    llm_trace_retention_days: int = 30
+    # OpenTelemetry: apagado por defecto. Langfuse ingiere OTLP, así que apuntarlo allí es
+    # solo poner el endpoint. Las dependencias van en el extra `otel`.
+    otel_enabled: bool = False
+    otel_service_name: str = "agenda-escolar-bot"
     retry_give_up_hours: int = 24
 
     # --- Ollama ---

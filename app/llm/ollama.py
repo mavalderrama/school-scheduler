@@ -55,9 +55,12 @@ class OllamaProvider:
             max_retries=0,
         )
         self.last_usage: LLMUsage | None = None
+        self.last_prompt: str | None = None
+        self.last_response: dict[str, Any] | None = None
 
     async def _chat_json(self, model: str, content: Any, schema: dict[str, Any]) -> str:
         """Una llamada de chat con salida JSON forzada por schema; devuelve el texto crudo."""
+        self.last_prompt = content if isinstance(content, str) else _text_of(content)
         started = time.monotonic()
         try:
             response = await self._client.chat.completions.create(
@@ -92,7 +95,9 @@ class OllamaProvider:
             cost_usd=None,
             duration_ms=duration_ms,
         )
-        return response.choices[0].message.content or ""
+        text = response.choices[0].message.content or ""
+        self.last_response = {"raw": text}
+        return text
 
     async def extract_from_image(
         self, image_path: Path, today: date, note: str | None = None
@@ -173,3 +178,11 @@ class OllamaProvider:
             model=f"{self.vision_model} / {self.text_model}",
             latency_ms=latency,
         )
+
+
+def _text_of(content: Any) -> str:
+    """Solo la parte de texto de un contenido multimodal: la imagen no va a la traza."""
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict) and "text" in p]
+        return "\n".join(parts)
+    return str(content)

@@ -95,6 +95,8 @@ class ClaudeSDKProvider:
         self._config_dir = settings.data_dir / "claude"
         self._api_timeout_ms = max(settings.llm_vision_timeout, settings.llm_text_timeout) * 1000
         self.last_usage: LLMUsage | None = None
+        self.last_prompt: str | None = None
+        self.last_response: dict[str, Any] | None = None
 
     # --- Construcción de opciones -------------------------------------------------
 
@@ -146,6 +148,7 @@ class ClaudeSDKProvider:
         max_turns: int | None = None,
     ) -> tuple[dict[str, Any], ResultMessage]:
         """Ejecuta una sesión y devuelve (structured_output, ResultMessage)."""
+        self.last_prompt = prompt
         options = self._options(
             tools=tools, schema=schema, cwd=cwd, max_turns=max_turns or self._max_turns
         )
@@ -166,6 +169,13 @@ class ClaudeSDKProvider:
         if result is None:
             raise LLMUnavailableError("claude_sdk: la sesión terminó sin ResultMessage")
         self.last_usage = _usage_from_result(result, self.model, duration_ms)
+        # La traza se guarda ANTES de validar: cuando falla es justo cuando hace falta ver
+        # qué contestó de verdad, incluido el `subtype` de un error de Claude Code.
+        self.last_response = (
+            result.structured_output
+            if isinstance(result.structured_output, dict)
+            else {"subtype": result.subtype, "result": str(result.result)[:4000]}
+        )
         if result.subtype != "success" or not isinstance(result.structured_output, dict):
             raise LLMOutputError(
                 f"claude_sdk: sin salida estructurada (subtype={result.subtype}, "

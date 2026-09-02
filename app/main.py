@@ -32,6 +32,7 @@ from app.config import (  # noqa: E402
 from app.db import repo  # noqa: E402
 from app.llm.provider import build_providers  # noqa: E402
 from app.log import configure_logging, get_logger  # noqa: E402
+from app.obs import setup_tracing  # noqa: E402
 from app.scheduler.jobs import build_scheduler, register_jobs  # noqa: E402
 from app.services.confirm import PendingStore  # noqa: E402
 from app.web import admin_url, build_admin_server  # noqa: E402
@@ -57,6 +58,8 @@ async def run(settings: Settings) -> None:
             settings.django_superuser_email,
         )
         log.info("superuser_ready", username=settings.django_superuser_username, created=created)
+
+    setup_tracing(settings)
 
     providers = build_providers(settings)
     log.info("llm_providers", vision=providers.vision.name, text=providers.text.name)

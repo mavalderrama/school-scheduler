@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,6 +59,8 @@ class FakeProvider:
         self.result = result or ExtractionResult(entries=[], doubts=[], detected_language="es")
         self.calls = 0
         self.last_usage: LLMUsage | None = None
+        self.last_prompt: str | None = None
+        self.last_response: dict[str, Any] | None = None
         self.corrections: list[str] = []
         self.notes: list[str | None] = []
         self.refinements: list[list[QAPair]] = []

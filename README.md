@@ -118,6 +118,17 @@ bot anunciará clases en días en los que no hay colegio.
 2. `make up`. La fila en `users` se crea sola la primera vez que mande algo; el nombre y
    el rol se pueden editar en el admin.
 
+### Ver qué pasó con una llamada al LLM
+
+En el admin, **llamadas al LLM**: cada fila trae el prompt exacto que se envió y la
+respuesta cruda del modelo, además de tokens, coste y duración. Se guardan también las
+llamadas fallidas, que es justo cuando hacen falta. Se purgan a los
+`LLM_TRACE_RETENTION_DAYS` (30 por defecto) conservando la fila y las métricas.
+
+Si quieres una UI de verdad (Langfuse autoalojado, por ejemplo), `OTEL_ENABLED=true` más
+`OTEL_EXPORTER_OTLP_ENDPOINT` exporta las mismas llamadas por OTLP; hay que construir la
+imagen con el extra `otel`.
+
 ### Qué mirar cuando algo va mal
 
 - `/estado` en Telegram: última notificación, últimas fuentes, consumo del mes por
