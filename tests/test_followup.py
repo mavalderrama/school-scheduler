@@ -100,15 +100,15 @@ def test_a_plain_agenda_photo_is_never_interrogated() -> None:
     assert ingest.missing_essentials(plain) == []
 
 
-def test_essentials_come_first_and_model_questions_are_appended() -> None:
+def test_only_the_essentials_are_asked_while_something_essential_is_missing() -> None:
     questions = ingest.pending_questions(extraction(questions=["¿Es de este año?"]))
-    assert "Semana A" in questions[0]  # lo imprescindible primero
-    assert questions[1] == "¿Es de este año?"
+    assert questions == ingest.missing_essentials(extraction())
+    assert "¿Es de este año?" not in questions  # se preguntará en la ronda siguiente
 
 
-def test_duplicate_questions_are_not_asked_twice() -> None:
+def test_a_complete_schedule_is_never_interrogated() -> None:
     dup = extraction(anchor=ANCHOR, questions=["¿Es de este año?", "  ¿ES DE ESTE AÑO?  "])
-    assert ingest.pending_questions(dup) == ["¿Es de este año?"]
+    assert ingest.pending_questions(dup) == []
 
 
 # --- El interrogatorio ------------------------------------------------------------------------
@@ -483,3 +483,78 @@ def test_a_failed_refine_puts_the_question_back() -> None:
 def test_the_question_always_shows_the_way_out() -> None:
     text = compose.format_question("¿Qué lunes empezó la Semana A?", remaining=0)
     assert "descarta" in text.lower()
+
+
+# --- Cada foto se lee sola ---------------------------------------------------------------
+
+
+def test_a_weekly_program_is_not_asked_about_week_a() -> None:
+    """Caso real: el PAC no tiene alternancia A/B, y preguntarle por «la Semana A» le
+    importaba el vocabulario del horario académico, que es otro documento distinto."""
+    weekly = pac_draft()
+    assert weekly.schedule is not None
+    weekly.schedule.anchor_monday = None
+
+    question = ingest.missing_essentials(weekly)[0]
+    assert "Semana A" not in question
+    assert "Desde qué lunes aplica" in question
+
+
+def test_a_rotating_schedule_is_still_asked_about_its_week() -> None:
+    rotating = extraction()  # K4A: ciclo de 2 semanas
+    assert "Semana A" in ingest.missing_essentials(rotating)[0]
+
+
+def test_essentials_replace_the_model_questions_instead_of_stacking() -> None:
+    """El modelo propuso «¿a partir de qué lunes...?» y el bot preguntaba las dos.
+
+    Son el mismo dato con otras palabras; encadenarlas se lee fatal y por eso salía
+    «(1 pregunta más)» para nada.
+    """
+    incomplete = extraction(
+        questions=["¿A partir de qué lunes debe empezar a contarse este horario?"]
+    )
+    assert ingest.pending_questions(incomplete) == ingest.missing_essentials(incomplete)
+    assert len(ingest.pending_questions(incomplete)) == 1
+
+
+def test_model_questions_are_shown_not_interrogated() -> None:
+    """Ya con el ancla puesta no se pregunta nada: lo que el modelo dude se enseña."""
+    complete = extraction(anchor=ANCHOR, questions=["¿Sigue vigente este año?"])
+    assert ingest.pending_questions(complete) == []
+    assert "¿Sigue vigente este año?" in compose.format_extraction(complete)
+
+
+def test_a_schedule_with_a_start_date_needs_no_question_at_all() -> None:
+    """Con la fecha de inicio en la imagen el prompt ya resuelve el ancla: cero preguntas."""
+    pac = pac_draft()  # trae anchor_monday = lunes de la semana del 1 de septiembre
+    assert ingest.pending_questions(pac) == []
+
+
+def test_a_weekly_schedule_is_not_described_as_rotating() -> None:
+    """«Horario rotativo / Ciclo de 1 semanas / Semana A» para el PAC era vocabulario
+    prestado del horario académico, que es otro documento."""
+    text = compose.format_extraction(pac_draft())
+    assert "horario semanal" in text
+    assert "Se repite igual todas las semanas" in text
+    assert "rotativo" not in text
+    assert "Semana A" not in text
+    assert "1 semanas" not in text
+    assert "Aplica desde el" in text
+
+
+def test_a_rotating_schedule_keeps_its_week_labels() -> None:
+    text = compose.format_extraction(extraction(anchor=ANCHOR))
+    assert "horario rotativo" in text
+    assert "Ciclo de 2 semanas" in text
+    assert "Semana A" in text and "Semana B" in text
+
+
+async def test_a_weekly_schedule_shows_no_week_label_in_the_day_line() -> None:
+    """La línea del día tampoco debe decir «Semana A» si no hay alternancia."""
+    src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    await agenda.apply_source(src.pk, pac_draft(), today=date(2026, 9, 2))
+    slots = await schedule.resolve_day(date(2026, 9, 3))
+    assert [s.subject for s in slots] == ["Jornada extendida de natación"]
+    assert slots[0].week_label is None
+    assert "Semana" not in compose.slot_lines(slots)[0]

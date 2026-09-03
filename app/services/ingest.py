@@ -293,12 +293,21 @@ def missing_essentials(extraction: ExtractionResult) -> list[str]:
 
     missing: list[str] = []
     if schedule.anchor_monday is None:
-        labels = [s.week_label for s in schedule.slots]
-        first = labels[0] if labels else "A"
-        missing.append(
-            f"¿Qué lunes empezó la Semana {first}? Puedes decirme cualquier día de esa "
-            "semana y yo saco el lunes."
-        )
+        # Un horario que se repite igual cada semana no tiene «Semana A»: preguntarlo así
+        # importa el vocabulario de otro horario y confunde. Cada foto se lee sola.
+        if schedule.cycle_weeks > 1:
+            labels = [s.week_label for s in schedule.slots]
+            first = labels[0] if labels else "A"
+            question = (
+                f"¿Qué lunes empezó la Semana {first}? Puedes decirme cualquier día de esa "
+                "semana y yo saco el lunes."
+            )
+        else:
+            question = (
+                "¿Desde qué lunes aplica este horario? Puedes decirme cualquier día de esa "
+                "semana y yo saco el lunes."
+            )
+        missing.append(question)
     elif schedule.anchor_monday.weekday() != 0:
         missing.append(
             f"Me diste el {schedule.anchor_monday.isoformat()}, que no es lunes. "
@@ -308,15 +317,14 @@ def missing_essentials(extraction: ExtractionResult) -> list[str]:
 
 
 def pending_questions(extraction: ExtractionResult) -> list[str]:
-    """Lo esencial primero y luego lo que proponga el modelo, sin repetir."""
-    questions = missing_essentials(extraction)
-    seen = {q.strip().lower() for q in questions}
-    for extra in extraction.questions:
-        text = extra.strip()
-        if text and text.lower() not in seen:
-            questions.append(text)
-            seen.add(text.lower())
-    return questions
+    """Qué bloquea el guardado y hay que preguntar. **Solo lo esencial**, decidido en Python.
+
+    Las `questions` del modelo no interrogan: se muestran como dudas en el resumen. Si no
+    fuera así el bot preguntaría cosas que ya sabe —el modelo pide el lunes de inicio en la
+    misma respuesta en la que ya lo dedujo de la fecha de la imagen— y encadenaría dos
+    formas del mismo dato, que es justo lo que se leía mal.
+    """
+    return missing_essentials(extraction)
 
 
 async def refine_extraction(

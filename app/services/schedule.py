@@ -72,7 +72,9 @@ def slot_for(
 
     info = schoolcal.day_info(day, exceptions=exceptions, country=country)
     index = week_index(day, template)
-    label = _label_for(index, slots)
+    # Un horario que se repite igual cada semana no tiene «Semana A»: sin etiqueta, para
+    # que ninguna vista acabe enseñando el vocabulario A/B de otro horario distinto.
+    label = _label_for(index, slots) if template.cycle_weeks > 1 else None
 
     if not info.is_school_day:
         # `skip_day`: la etiqueta de la semana no se toca, solo se pierde esa rotación.
@@ -90,7 +92,7 @@ def slot_for(
         )
     return SlotResult(
         day,
-        week_label=match.week_label,
+        week_label=match.week_label if template.cycle_weeks > 1 else None,
         rotation=match.rotation,
         subject=match.subject,
         schedule_name=name,

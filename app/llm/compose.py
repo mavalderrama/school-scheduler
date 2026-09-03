@@ -107,20 +107,45 @@ def slot_lines(slots: Sequence[SlotLike], *, with_date: bool = False) -> list[st
     return [slot_line(s, with_date=with_date, with_schedule=many) for s in slots]
 
 
+def _slot_bullet(slot: SlotDraft) -> str:
+    day = WEEKDAY_LABELS.get(slot.weekday, str(slot.weekday))
+    rotation = f" ({html.escape(slot.rotation)})" if slot.rotation else ""
+    return f"• {day}: {html.escape(slot.subject)}{rotation}"
+
+
 def format_schedule_draft(draft: ScheduleDraft) -> str:
-    """Resumen de un horario recién leído de una foto, para confirmarlo."""
-    lines = [f"🗓️ Entendí un <b>horario rotativo</b>: {html.escape(draft.name or 'sin título')}"]
-    lines.append(f"Ciclo de {draft.cycle_weeks} semanas, {len(draft.slots)} franjas.")
+    """Resumen de un horario recién leído de una foto, para confirmarlo.
+
+    Un ciclo de una semana no es un horario rotativo y no tiene «Semana A»: llamarlo así
+    importa el vocabulario de otro horario distinto, que es justo lo que confundía.
+    """
+    name = html.escape(draft.name or "sin título")
+    slot_count = f"{len(draft.slots)} franja{'s' if len(draft.slots) != 1 else ''}"
+
+    if draft.cycle_weeks <= 1:
+        lines = [
+            f"🗓️ Entendí un <b>horario semanal</b>: {name}",
+            f"Se repite igual todas las semanas, {slot_count}.",
+            "",
+        ]
+        lines.extend(_slot_bullet(s) for s in sorted(draft.slots, key=lambda s: s.weekday))
+        if draft.anchor_monday is not None:
+            lines.append("")
+            lines.append(f"Aplica desde el {format_date_es(draft.anchor_monday)}.")
+        return "\n".join(lines)
+
+    weeks = f"{draft.cycle_weeks} semanas" if draft.cycle_weeks != 1 else "1 semana"
+    lines = [
+        f"🗓️ Entendí un <b>horario rotativo</b>: {name}",
+        f"Ciclo de {weeks}, {slot_count}.",
+    ]
     by_week: dict[str, list[SlotDraft]] = {}
     for slot in sorted(draft.slots, key=lambda s: (s.week_label, s.weekday)):
         by_week.setdefault(slot.week_label, []).append(slot)
     for label, slots in by_week.items():
         lines.append("")
         lines.append(f"<b>Semana {html.escape(label)}</b>")
-        for slot in slots:
-            day = WEEKDAY_LABELS.get(slot.weekday, str(slot.weekday))
-            rotation = f" ({html.escape(slot.rotation)})" if slot.rotation else ""
-            lines.append(f"• {day}: {html.escape(slot.subject)}{rotation}")
+        lines.extend(_slot_bullet(s) for s in slots)
     if draft.anchor_monday is not None:
         lines.append("")
         lines.append(
@@ -133,10 +158,13 @@ def format_extraction(extraction: ExtractionResult) -> str:
     """Resumen de lo leído, agrupado por día, con dudas y marcas de confianza."""
     if extraction.doc_type == "schedule" and extraction.schedule is not None:
         parts = [format_schedule_draft(extraction.schedule)]
-        if extraction.doubts:
+        # Lo que el modelo no tiene claro se enseña, no se pregunta: si algo fuera
+        # imprescindible lo habría detectado `ingest.missing_essentials` antes de llegar aquí.
+        notes = [*extraction.doubts, *extraction.questions]
+        if notes:
             parts.append("")
             parts.append("⚠️ Dudas:")
-            parts.extend(f"• {html.escape(d)}" for d in extraction.doubts)
+            parts.extend(f"• {html.escape(d)}" for d in notes)
         parts.append("")
         parts.append("¿Lo guardo?")
         return "\n".join(parts)
@@ -267,11 +295,20 @@ def format_schedule_table(
 ) -> str:
     """La tabla completa del horario para /horario. `slots` son filas de ScheduleSlot."""
     lines = [f"🗓️ <b>{html.escape(template_name)}</b>"]
-    if current_label:
-        lines.append(f"Esta semana es la <b>Semana {html.escape(current_label)}</b>.")
     by_week: dict[str, list[Any]] = {}
     for slot in slots:
         by_week.setdefault(slot.week_label, []).append(slot)
+    if len(by_week) <= 1:
+        # Horario semanal: sin etiquetas de semana, que aquí solo confundirían.
+        lines.append("Se repite igual todas las semanas.")
+        lines.append("")
+        for slot in sorted(next(iter(by_week.values()), []), key=lambda s: s.weekday):
+            day = WEEKDAY_LABELS.get(slot.weekday, str(slot.weekday))
+            rotation = f" ({html.escape(slot.rotation)})" if slot.rotation else ""
+            lines.append(f"• {day}: {html.escape(slot.subject)}{rotation}")
+        return "\n".join(lines)
+    if current_label:
+        lines.append(f"Esta semana es la <b>Semana {html.escape(current_label)}</b>.")
     for label, week_slots in by_week.items():
         lines.append("")
         marker = " ← esta semana" if label == current_label else ""
