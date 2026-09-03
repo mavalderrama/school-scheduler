@@ -76,6 +76,16 @@ async def build_status(settings: Settings, providers: LLMProviders, *, scope: Sc
     # Proveedores configurados y su última llamada conocida.
     lines.append(f"Visión: <code>{providers.vision.name}</code>")
     lines.append(f"Texto: <code>{providers.text.name}</code>")
+    family = await repo.get_family(scope.family_id)
+    if family is not None and not family.uses_host_llm:
+        rows = await repo.credentials_of(scope.family_id)
+        have = {row.provider for row in rows if row.is_active and row.secret}
+        needed = {str(family.vision_provider), str(family.text_provider)}
+        missing = sorted(needed - have - {"ollama"})
+        if missing:
+            lines.append(f"⚠️ Falta la clave de: {', '.join(missing)} (mándamela con /clave)")
+        used = await repo.calls_this_month(scope.family_id, month_start)
+        lines.append(f"📈 Llamadas este mes: {used} de {family.monthly_call_limit}")
     last_calls = await repo.last_call_by_provider(scope.family_id)
     if last_calls:
         lines.append("")

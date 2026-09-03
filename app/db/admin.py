@@ -18,6 +18,7 @@ from app.db.models import (
     CalendarException,
     Child,
     ConversationMessage,
+    Credential,
     Family,
     GraphThread,
     LLMCacheEntry,
@@ -299,6 +300,27 @@ class FamilyAdmin(NoDeleteMixin, admin.ModelAdmin[Family]):
     list_filter = ["is_active"]
     search_fields = ["name"]
     inlines = [ChildInline, MembershipInline]
+
+
+@admin.register(Credential)
+class CredentialAdmin(NoDeleteMixin, admin.ModelAdmin[Credential]):
+    """La clave nunca se muestra entera ni se puede leer desde aquí.
+
+    Se guarda cifrada con Fernet; el campo del formulario acepta una clave nueva en claro y
+    la cifra al guardar, pero lo que se enseña es siempre la máscara.
+    """
+
+    list_display = ["family", "provider", "clave", "is_active", "updated_at"]
+    list_filter = ["provider", "is_active"]
+    fields = ["family", "provider", "clave", "base_url", "vision_model", "text_model", "is_active"]
+    readonly_fields = ["clave"]
+
+    @admin.display(description="clave")
+    def clave(self, obj: Credential) -> str:
+        if not obj.secret:
+            return "(sin clave)"
+        # No se descifra para mostrarla: basta con saber que está y cuándo cambió.
+        return f"cifrada · actualizada {obj.updated_at:%d/%m/%Y %H:%M}"
 
 
 @admin.register(School)

@@ -51,6 +51,7 @@ async def run_ingest(settings: Settings, chain: LLMProviders) -> ingest.IngestRe
         settings=settings,
         providers=chain,
         child_id=TENANT.child_id,
+        family_id=TENANT.family_id,
     )
 
 
@@ -123,6 +124,7 @@ async def test_download_failure_marks_source_failed(settings: Settings) -> None:
             settings=settings,
             providers=providers(FakeProvider("a")),
             child_id=TENANT.child_id,
+            family_id=TENANT.family_id,
         )
     source = await repo.get_source(info.value.source_id)
     assert source is not None and source.status == SourceStatus.FAILED

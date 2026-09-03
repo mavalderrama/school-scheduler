@@ -26,6 +26,7 @@ from app.db.models import (
     CalendarException,
     Child,
     ConversationMessage,
+    Credential,
     Family,
     LLMCacheEntry,
     LLMCall,
@@ -107,6 +108,36 @@ async def child_for_chat(chat_id: int) -> Child | None:
 
 async def get_child(child_id: int) -> Child | None:
     return await Child.objects.select_related("family", "school").filter(pk=child_id).afirst()
+
+
+async def get_family(family_id: int) -> Family | None:
+    return await Family.objects.filter(pk=family_id, is_active=True).afirst()
+
+
+async def update_family(family_id: int, **fields: Any) -> None:
+    await Family.objects.filter(pk=family_id).aupdate(**fields)
+
+
+async def credentials_of(family_id: int) -> list[Credential]:
+    """Claves de una familia. El secreto viaja cifrado; lo descifra quien lo necesite."""
+    qs = Credential.objects.filter(family_id=family_id).order_by("provider")
+    return [row async for row in qs]
+
+
+async def upsert_credential(family_id: int, provider: str, **fields: Any) -> Credential:
+    row, _ = await Credential.objects.aupdate_or_create(
+        family_id=family_id, provider=provider, defaults=fields
+    )
+    return row
+
+
+async def calls_this_month(family_id: int, since: datetime) -> int:
+    """Llamadas reales al LLM de una familia (los aciertos de caché no cuentan)."""
+    return (
+        await LLMCall.objects.filter(family_id=family_id, created_at__gte=since)
+        .exclude(provider="cache")
+        .acount()
+    )
 
 
 async def children_of(family_id: int) -> list[Child]:

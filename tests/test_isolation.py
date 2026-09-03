@@ -235,6 +235,11 @@ SCOPED_BY_CHILD = {
     "get_child",
 }
 SCOPED_BY_FAMILY = {
+    "get_family",
+    "update_family",
+    "credentials_of",
+    "upsert_credential",
+    "calls_this_month",
     "recent_sources",
     "count_awaiting_extraction",
     "llm_usage_by_provider",

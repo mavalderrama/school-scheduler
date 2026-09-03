@@ -35,6 +35,7 @@ from app.graph.build import build_graph, checkpointer_pool  # noqa: E402
 from app.graph.runner import GraphRunner  # noqa: E402
 from app.graph.state import GraphContext  # noqa: E402
 from app.llm.provider import LLMProviders, build_providers  # noqa: E402
+from app.llm.tenant import TenantProviders  # noqa: E402
 from app.log import configure_logging, get_logger  # noqa: E402
 from app.obs import setup_tracing  # noqa: E402
 from app.scheduler.jobs import build_scheduler, register_jobs  # noqa: E402
@@ -65,6 +66,7 @@ async def run(settings: Settings) -> None:
     setup_tracing(settings)
 
     providers = build_providers(settings)
+    tenants = TenantProviders(settings)
     log.info("llm_providers", vision=providers.vision.name, text=providers.text.name)
 
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -77,7 +79,7 @@ async def run(settings: Settings) -> None:
         graph = build_graph().compile(checkpointer=saver)
         runner = GraphRunner(
             graph,
-            GraphContext(settings=settings, providers=providers, download=download),
+            GraphContext(settings=settings, tenants=tenants, download=download),
             saver,
             ttl_hours=settings.graph_state_ttl_hours,
         )

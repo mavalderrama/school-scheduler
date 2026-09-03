@@ -62,9 +62,12 @@ def _model_of(attempts: list[LLMAttempt]) -> str | None:
     return None
 
 
-async def _log_attempts(task: str, attempts: list[LLMAttempt], *, trace: bool = True) -> None:
+async def _log_attempts(
+    task: str, attempts: list[LLMAttempt], *, trace: bool = True, family_id: int | None = None
+) -> None:
     for attempt in attempts:
         await repo.log_llm_call(
+            family_id=family_id,
             task=task,
             provider=attempt.provider,
             ok=attempt.ok,
@@ -77,11 +80,15 @@ async def _log_attempts(task: str, attempts: list[LLMAttempt], *, trace: bool = 
 
 
 async def _log_cache_hit(
-    task: str, hit: cache.CacheHit[ExtractionResult], duration_ms: int
+    task: str,
+    hit: cache.CacheHit[ExtractionResult],
+    duration_ms: int,
+    family_id: int | None = None,
 ) -> None:
     """Un acierto también se registra: gasta cero tokens, pero cuenta como llamada."""
     await repo.log_llm_call(
         task=task,
+        family_id=family_id,
         provider=cache.CACHE_PROVIDER,
         ok=True,
         error=None,
@@ -97,6 +104,7 @@ async def extract_photo(
     settings: Settings,
     providers: LLMProviders,
     note: str | None = None,
+    family_id: int | None = None,
 ) -> tuple[ExtractionResult, str]:
     """Extracción con la cadena de visión; registra intentos y actualiza la source.
 
@@ -111,13 +119,13 @@ async def extract_photo(
         task="vision",
         today=today,
         tz=settings.tz,
-        inputs=[image_sha, cache.hash_text(note or "")],
+        inputs=[str(family_id), image_sha, cache.hash_text(note or "")],
     )
 
     started = time.monotonic()
     hit = await cache.get(ExtractionResult, key, settings)
     if hit is not None:
-        await _log_cache_hit("vision", hit, int((time.monotonic() - started) * 1000))
+        await _log_cache_hit("vision", hit, int((time.monotonic() - started) * 1000), family_id)
         await repo.update_source(
             source_id,
             raw_llm_output=hit.value.model_dump(mode="json"),
@@ -134,13 +142,19 @@ async def extract_photo(
         )
     except LLMQuotaError as exc:
         # La source queda `pending` a propósito: `retry_photos_job` la reintenta sola.
-        await _log_attempts("vision", exc.attempts, trace=settings.llm_trace_enabled)
+        await _log_attempts(
+            "vision", exc.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+        )
         raise
     except LLMError as exc:
-        await _log_attempts("vision", exc.attempts, trace=settings.llm_trace_enabled)
+        await _log_attempts(
+            "vision", exc.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+        )
         await repo.update_source(source_id, status=SourceStatus.FAILED)
         raise
-    await _log_attempts("vision", run.attempts, trace=settings.llm_trace_enabled)
+    await _log_attempts(
+        "vision", run.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+    )
     await cache.put(
         key,
         task="vision",
@@ -174,6 +188,7 @@ async def ingest_photo(
     display_name: str,
     chat_id: int,
     child_id: int,
+    family_id: int,
     download: Downloader,
     settings: Settings,
     providers: LLMProviders,
@@ -227,6 +242,7 @@ async def correct_extraction(
     correction: str,
     settings: Settings,
     providers: LLMProviders,
+    family_id: int | None = None,
 ) -> ExtractionResult:
     """Aplica una corrección en texto libre a la extracción pendiente (cadena de texto)."""
     today = datetime.now(settings.zoneinfo).date()
@@ -235,6 +251,7 @@ async def correct_extraction(
         today=today,
         tz=settings.tz,
         inputs=[
+            str(family_id),
             cache.hash_text(extraction.model_dump_json()),
             cache.hash_text(correction),
         ],
@@ -243,7 +260,7 @@ async def correct_extraction(
     started = time.monotonic()
     hit = await cache.get(ExtractionResult, key, settings)
     if hit is not None:
-        await _log_cache_hit("correction", hit, int((time.monotonic() - started) * 1000))
+        await _log_cache_hit("correction", hit, int((time.monotonic() - started) * 1000), family_id)
         await repo.update_source(source_id, raw_llm_output=hit.value.model_dump(mode="json"))
         log.info(
             "extraction_corrected", source_id=source_id, provider=hit.provider, from_cache=True
@@ -255,9 +272,13 @@ async def correct_extraction(
             lambda p: p.correct_extraction(extraction, correction, today)
         )
     except LLMError as exc:
-        await _log_attempts("correction", exc.attempts, trace=settings.llm_trace_enabled)
+        await _log_attempts(
+            "correction", exc.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+        )
         raise
-    await _log_attempts("correction", run.attempts, trace=settings.llm_trace_enabled)
+    await _log_attempts(
+        "correction", run.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+    )
     await cache.put(
         key,
         task="correction",
@@ -335,6 +356,7 @@ async def refine_extraction(
     pairs: list[QAPair],
     settings: Settings,
     providers: LLMProviders,
+    family_id: int | None = None,
 ) -> ExtractionResult:
     """Reinterpreta la extracción con las respuestas del usuario (cadena de texto + caché)."""
     today = datetime.now(settings.zoneinfo).date()
@@ -343,6 +365,7 @@ async def refine_extraction(
         today=today,
         tz=settings.tz,
         inputs=[
+            str(family_id),
             cache.hash_text(extraction.model_dump_json()),
             cache.hash_text("\n".join(f"{p.question}|{p.answer}" for p in pairs)),
         ],
@@ -351,16 +374,20 @@ async def refine_extraction(
     started = time.monotonic()
     hit = await cache.get(ExtractionResult, key, settings)
     if hit is not None:
-        await _log_cache_hit("refine", hit, int((time.monotonic() - started) * 1000))
+        await _log_cache_hit("refine", hit, int((time.monotonic() - started) * 1000), family_id)
         await repo.update_source(source_id, raw_llm_output=hit.value.model_dump(mode="json"))
         return hit.value
 
     try:
         run = await providers.text.run(lambda p: p.refine_extraction(extraction, pairs, today))
     except LLMError as exc:
-        await _log_attempts("refine", exc.attempts, trace=settings.llm_trace_enabled)
+        await _log_attempts(
+            "refine", exc.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+        )
         raise
-    await _log_attempts("refine", run.attempts, trace=settings.llm_trace_enabled)
+    await _log_attempts(
+        "refine", run.attempts, trace=settings.llm_trace_enabled, family_id=family_id
+    )
     await cache.put(
         key,
         task="refine",

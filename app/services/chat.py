@@ -132,6 +132,7 @@ async def classify(
     has_pending: bool,
     settings: Settings,
     providers: LLMProviders,
+    family_id: int | None = None,
 ) -> Intent:
     """Clasifica con la cadena de texto, pasando por la caché.
 
@@ -144,6 +145,7 @@ async def classify(
         today=today,
         tz=settings.tz,
         inputs=[
+            str(family_id),
             cache.hash_text(text),
             cache.hash_text(format_history(history)),
             str(has_pending),
@@ -154,6 +156,7 @@ async def classify(
     if hit is not None:
         await repo.log_llm_call(
             task="intent",
+            family_id=family_id,
             provider=cache.CACHE_PROVIDER,
             ok=True,
             error=None,
@@ -171,6 +174,7 @@ async def classify(
         for attempt in exc.attempts:
             await repo.log_llm_call(
                 task="intent",
+                family_id=family_id,
                 provider=attempt.provider,
                 ok=attempt.ok,
                 error=attempt.error,
@@ -183,6 +187,7 @@ async def classify(
     for attempt in run.attempts:
         await repo.log_llm_call(
             task="intent",
+            family_id=family_id,
             provider=attempt.provider,
             ok=attempt.ok,
             error=attempt.error,

@@ -11,6 +11,15 @@ from django.db.models import F, Q
 from django.db.models.functions import Now
 
 
+class CredentialProvider(models.TextChoices):
+    """Proveedores que una familia puede traer. `claude_sdk` no está: es la suscripción
+    personal del operador y no se cede a terceros."""
+
+    ANTHROPIC_API = "anthropic_api", "Anthropic (API)"
+    OPENAI = "openai", "OpenAI"
+    OLLAMA = "ollama", "Ollama propio"
+
+
 class MembershipRole(models.TextChoices):
     OWNER = "owner", "Responsable"
     PARENT = "parent", "Padre/madre"
@@ -72,6 +81,34 @@ class Family(models.Model):
     indirectamente, y ninguna consulta debe cruzar esta frontera."""
 
     name = models.TextField(verbose_name="nombre")
+    vision_provider = models.TextField(
+        choices=CredentialProvider,
+        default=CredentialProvider.ANTHROPIC_API,
+        db_default=CredentialProvider.ANTHROPIC_API,
+        verbose_name="proveedor de visión",
+    )
+    text_provider = models.TextField(
+        choices=CredentialProvider,
+        default=CredentialProvider.ANTHROPIC_API,
+        db_default=CredentialProvider.ANTHROPIC_API,
+        verbose_name="proveedor de texto",
+    )
+    uses_host_llm = models.BooleanField(
+        default=False,
+        db_default=False,
+        verbose_name="usa el LLM del anfitrión",
+        help_text=(
+            "Solo para la familia del operador: usa la suscripción configurada en el .env "
+            "en vez de una clave propia. Ceder esa suscripción a terceros va contra sus "
+            "términos de uso."
+        ),
+    )
+    monthly_call_limit = models.IntegerField(
+        default=500,
+        db_default=500,
+        verbose_name="límite de llamadas al mes",
+        help_text="Aunque cada familia pague su API, el disco y la CPU son del anfitrión.",
+    )
     is_active = models.BooleanField(default=True, db_default=True, verbose_name="activa")
     created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
 
@@ -604,3 +641,43 @@ class GraphThread(models.Model):
 
     def __str__(self) -> str:
         return self.thread_id
+
+
+class Credential(models.Model):
+    """La clave de LLM de una familia, cifrada en reposo.
+
+    El valor nunca se guarda en claro ni se muestra entero: el admin lo enseña enmascarado
+    y los logs no lo tocan. Se cifra con Fernet usando `CREDENTIALS_KEY`, así que un volcado
+    de la base sin esa clave no sirve de nada.
+    """
+
+    family = models.ForeignKey(
+        "Family", on_delete=models.PROTECT, related_name="credentials", verbose_name="familia"
+    )
+    provider = models.TextField(choices=CredentialProvider, verbose_name="proveedor")
+    secret = models.TextField(
+        blank=True, default="", verbose_name="clave cifrada", help_text="Cifrada con Fernet."
+    )
+    base_url = models.TextField(
+        blank=True, default="", verbose_name="URL base", help_text="Solo para Ollama."
+    )
+    vision_model = models.TextField(blank=True, default="", verbose_name="modelo de visión")
+    text_model = models.TextField(blank=True, default="", verbose_name="modelo de texto")
+    is_active = models.BooleanField(default=True, db_default=True, verbose_name="activa")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="actualizada")
+
+    class Meta:
+        db_table = "credentials"
+        verbose_name = "clave de LLM"
+        verbose_name_plural = "claves de LLM"
+        constraints = [
+            models.UniqueConstraint(fields=["family", "provider"], name="credential_unique"),
+            models.CheckConstraint(
+                condition=Q(provider__in=CredentialProvider.values),
+                name="credential_provider_check",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.provider} de {self.family_id}"

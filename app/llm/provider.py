@@ -98,6 +98,10 @@ def build_provider(name: ProviderName, settings: Settings) -> LLMProvider:
         from app.llm.anthropic_api import AnthropicAPIProvider
 
         return AnthropicAPIProvider(settings)
+    if name == "openai":
+        from app.llm.openai_api import OpenAIProvider
+
+        return OpenAIProvider(settings)
     raise ValueError(f"proveedor desconocido: {name!r}")
 
 

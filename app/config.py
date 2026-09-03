@@ -23,8 +23,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-ProviderName = Literal["ollama", "claude_sdk", "anthropic_api"]
-FallbackName = Literal["none", "ollama", "claude_sdk", "anthropic_api"]
+ProviderName = Literal["ollama", "claude_sdk", "anthropic_api", "openai"]
+FallbackName = Literal["none", "ollama", "claude_sdk", "anthropic_api", "openai"]
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -147,6 +147,9 @@ class Settings(DjangoSettings):
     ha_url: str | None = None
     ha_token: str | None = None
     ha_notify_service: str | None = None
+    # Cifrado de las claves de LLM de cada familia (Fase 9.2). Sin esto no se pueden
+    # guardar ni leer claves de terceros.
+    credentials_key: str | None = None
     retry_give_up_hours: int = 24
 
     # --- Ollama ---
@@ -159,6 +162,12 @@ class Settings(DjangoSettings):
     claude_sdk_model: str = "sonnet"
     claude_sdk_max_turns: int = 4
     claude_token_issued_at: date | None = None
+
+    # --- OpenAI ---
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_vision_model: str = "gpt-5"
+    openai_text_model: str = "gpt-5-mini"
 
     # --- Claude por API key ---
     anthropic_api_key: str | None = None
@@ -228,6 +237,8 @@ class Settings(DjangoSettings):
                 problems.append(
                     "el proveedor anthropic_api está seleccionado pero falta ANTHROPIC_API_KEY"
                 )
+            elif name == "openai" and not self.openai_api_key:
+                problems.append("el proveedor openai está seleccionado pero falta OPENAI_API_KEY")
 
         if self.admin_enabled and self.django_secret_key == INSECURE_SECRET_KEY:
             problems.append(

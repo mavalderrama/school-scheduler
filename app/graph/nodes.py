@@ -61,6 +61,7 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
     disco y la source existe, así que solo se vuelve a leer.
     """
     ctx = runtime.context
+    sc = await _scope(state)
     photo = state.get("photo") or {}
     source_id = state.get("source_id")
     if source_id is not None and photo.get("local_path"):
@@ -69,8 +70,9 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
                 source_id,
                 Path(photo["local_path"]),
                 ctx.settings,
-                ctx.providers,
+                await ctx.tenants.for_family(sc.family_id),
                 photo.get("caption"),
+                family_id=sc.family_id,
             )
         except LLMError as exc:
             return {"error": str(exc)}
@@ -88,9 +90,10 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
             display_name=photo["display_name"],
             chat_id=state["chat_id"],
             child_id=state["child_id"],
+            family_id=sc.family_id,
             download=ctx.download,
             settings=ctx.settings,
-            providers=ctx.providers,
+            providers=await ctx.tenants.for_family(sc.family_id),
             note=photo.get("caption"),
         )
     except ingest.IngestError as exc:
@@ -137,8 +140,14 @@ async def refine(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str,
     if source_id is None:
         return {"error": "no hay foto pendiente"}
     try:
+        sc = await _scope(state)
         refined = await ingest.refine_extraction(
-            source_id, _extraction(state), _answers(state), ctx.settings, ctx.providers
+            source_id,
+            _extraction(state),
+            _answers(state),
+            ctx.settings,
+            await ctx.tenants.for_family(sc.family_id),
+            family_id=sc.family_id,
         )
     except LLMError as exc:
         log.warning("graph_refine_failed", source_id=source_id, error=str(exc))
@@ -182,8 +191,14 @@ async def correct(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
     if source_id is None:
         return {"error": "no hay foto pendiente"}
     try:
+        sc = await _scope(state)
         corrected = await ingest.correct_extraction(
-            source_id, _extraction(state), str(text), ctx.settings, ctx.providers
+            source_id,
+            _extraction(state),
+            str(text),
+            ctx.settings,
+            await ctx.tenants.for_family(sc.family_id),
+            family_id=sc.family_id,
         )
     except LLMError as exc:
         log.warning("graph_correction_failed", source_id=source_id, error=str(exc))

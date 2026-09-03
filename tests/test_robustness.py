@@ -43,6 +43,7 @@ async def ingest_photo(settings: Settings, provider: FakeProvider) -> ingest.Ing
         settings=settings,
         providers=providers(provider),
         child_id=TENANT.child_id,
+        family_id=TENANT.family_id,
     )
 
 

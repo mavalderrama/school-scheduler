@@ -389,6 +389,7 @@ async def test_the_photo_caption_reaches_the_model(settings: Settings) -> None:
         providers=providers(provider),
         note="Debes marcar este como PAC horario extendido",
         child_id=TENANT.child_id,
+        family_id=TENANT.family_id,
     )
     assert provider.notes == ["Debes marcar este como PAC horario extendido"]
 
@@ -409,6 +410,7 @@ async def test_the_caption_is_part_of_the_cache_key(settings: Settings) -> None:
             providers=providers(provider),
             note=note,
             child_id=TENANT.child_id,
+            family_id=TENANT.family_id,
         )
     assert provider.calls == 2  # la segunda repetición sí sale de la caché
 
@@ -429,6 +431,7 @@ async def test_the_caption_survives_a_restart(settings: Settings) -> None:
             providers=providers(provider),
             note="Debes marcar este como PAC horario extendido",
             child_id=TENANT.child_id,
+            family_id=TENANT.family_id,
         )
     source = await repo.get_source(info.value.source_id)
     assert source is not None

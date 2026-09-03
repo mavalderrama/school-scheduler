@@ -19,7 +19,9 @@ from app.db import repo
 from app.graph.build import build_graph, checkpointer_pool
 from app.graph.runner import GraphRunner
 from app.graph.state import GraphContext, GraphState
+from app.llm.provider import LLMProviders
 from app.llm.schemas import ExtractionResult, ScheduleDraft, SlotDraft
+from app.llm.tenant import TenantProviders
 from tests.conftest import TENANT, TEST_DATABASE_URL
 from tests.test_ingest import providers
 from tests.test_provider import FakeProvider
@@ -56,6 +58,22 @@ async def fake_download(file_id: str, destination: Path) -> None:
     destination.write_bytes(b"\xff\xd8fake-jpeg")  # noqa: ASYNC240 (test)
 
 
+def fake_tenants(settings: Settings, provider: FakeProvider) -> TenantProviders:
+    """Un resolutor que devuelve siempre la misma cadena falsa.
+
+    Los tests del grafo no van de credenciales: comprueban que la conversación sobrevive a
+    un reinicio, así que aquí el resolutor solo tiene que existir.
+    """
+    tenants = TenantProviders(settings)
+    chain = providers(provider)
+
+    async def always(family_id: int) -> LLMProviders:
+        return chain
+
+    tenants.for_family = always  # type: ignore[method-assign]
+    return tenants
+
+
 def photo_state(queue: list[dict[str, Any]] | None = None) -> GraphState:
     return {
         "chat_id": CHAT,
@@ -79,7 +97,7 @@ async def make_runner(settings: Settings, provider: FakeProvider) -> AsyncIterat
     async with checkpointer_pool(TEST_DATABASE_URL) as saver:
         graph = build_graph().compile(checkpointer=saver)
         context = GraphContext(
-            settings=settings, providers=providers(provider), download=fake_download
+            settings=settings, tenants=fake_tenants(settings, provider), download=fake_download
         )
         yield GraphRunner(graph, context)
 
@@ -224,7 +242,7 @@ async def test_an_abandoned_conversation_expires(settings: Settings, clean_threa
     async with checkpointer_pool(TEST_DATABASE_URL) as saver:
         graph = build_graph().compile(checkpointer=saver)
         context = GraphContext(
-            settings=settings, providers=providers(provider), download=fake_download
+            settings=settings, tenants=fake_tenants(settings, provider), download=fake_download
         )
         stale = GraphRunner(graph, context, saver, ttl_hours=0)
         assert await stale.is_waiting(CHAT) is False

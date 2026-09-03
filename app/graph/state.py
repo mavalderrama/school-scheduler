@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from app.config import Settings
-from app.llm.provider import LLMProviders
+from app.llm.tenant import TenantProviders
 
 Downloader = Callable[[str, Path], Awaitable[None]]
 
@@ -29,10 +29,14 @@ Decision = Literal["confirm", "reject", "correct", "add", "replace"]
 
 @dataclass
 class GraphContext:
-    """Lo que los nodos necesitan y no se puede (ni se debe) persistir."""
+    """Lo que los nodos necesitan y no se puede (ni se debe) persistir.
+
+    `tenants` resuelve la cadena de proveedores **de cada familia**: con claves propias ya
+    no hay una sola cadena para todo el proceso.
+    """
 
     settings: Settings
-    providers: LLMProviders
+    tenants: TenantProviders
     download: Downloader
 
 

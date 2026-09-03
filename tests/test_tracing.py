@@ -60,6 +60,7 @@ async def run_photo(settings: Settings, provider: FakeProvider) -> None:
         settings=settings,
         providers=chain(provider),
         child_id=TENANT.child_id,
+        family_id=TENANT.family_id,
     )
 
 
