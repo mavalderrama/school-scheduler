@@ -278,6 +278,11 @@ HELP_TEXT = (
 )
 
 
+NOT_LINKED_TEXT = (
+    "Este chat todavía no está vinculado a ningún niño. Usa /vincular para asociarlo, o "
+    "escríbeme por privado si aún no tienes familia dada de alta."
+)
+
 NO_SCHEDULE_TEXT = (
     "Todavía no tengo ningún horario cargado. Mándame una foto de la tabla "
     "(Semana A / Semana B) y te pregunto lo que falte."

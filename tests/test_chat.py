@@ -11,11 +11,21 @@ from app.db import repo
 from app.db.models import SourceKind
 from app.llm.provider import LLMUnavailableError
 from app.llm.schemas import ChatTurn, ExtractedEntry, ExtractionResult, Intent
-from app.services import agenda, chat
+from app.services import agenda, chat, scope
+from app.services.scope import Scope
+from tests.conftest import TENANT
 from tests.test_ingest import providers
 from tests.test_provider import FakeProvider
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+async def a_scope() -> Scope:
+    """El ámbito de la familia por defecto de los tests."""
+    found = await scope.for_child(TENANT.child_id)
+    assert found is not None
+    return found
+
 
 MON, TUE, WED = date(2026, 9, 7), date(2026, 9, 8), date(2026, 9, 9)
 SAT, SUN = date(2026, 9, 12), date(2026, 9, 13)
@@ -38,7 +48,7 @@ class IntentProvider(FakeProvider):
 
 
 async def seed(*entries: tuple[date, str, str]) -> None:
-    source = await repo.create_source(SourceKind.MANUAL)
+    source = await repo.create_source(SourceKind.MANUAL, child_id=TENANT.child_id)
     await agenda.apply_source(
         source.pk,
         ExtractionResult(
@@ -112,6 +122,7 @@ async def test_classify_propagates_llm_error_and_logs_attempts(settings: Setting
 async def test_query_single_day(settings: Settings) -> None:
     await seed((TUE, "bring", "sudadera"), (TUE, "homework", "pág. 12"), (WED, "note", "otra"))
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_range", date_from=TUE, date_to=TUE),
         today=MON,
         chat_id=1,
@@ -126,6 +137,7 @@ async def test_query_single_day(settings: Settings) -> None:
 async def test_query_range_groups_by_day(settings: Settings) -> None:
     await seed((TUE, "bring", "sudadera"), (WED, "event", "izada"))
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_range", date_from=MON, date_to=WED),
         today=MON,
         chat_id=1,
@@ -135,6 +147,7 @@ async def test_query_range_groups_by_day(settings: Settings) -> None:
 
 async def test_query_empty_range() -> None:
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_range", date_from=TUE, date_to=TUE),
         today=MON,
         chat_id=1,
@@ -144,12 +157,13 @@ async def test_query_empty_range() -> None:
 
 async def test_query_without_dates_uses_today() -> None:
     await seed((MON, "note", "hoy toca"))
-    reply = await chat.dispatch(Intent(action="query_range"), today=MON, chat_id=1)
+    reply = await chat.dispatch(await a_scope(), Intent(action="query_range"), today=MON, chat_id=1)
     assert "hoy toca" in reply.text
 
 
 async def test_add_entry_asks_for_confirmation() -> None:
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="add_entry", date_from=TUE, kind="bring", text="disfraz"),
         today=MON,
         chat_id=1,
@@ -162,11 +176,13 @@ async def test_add_entry_asks_for_confirmation() -> None:
     )
     assert "¿Agrego" in reply.text and "disfraz" in reply.text
     # Todavía no ha tocado la DB: nada se guarda sin confirmar.
-    assert await repo.active_entries(TUE, TUE) == []
+    assert await repo.active_entries(TENANT.child_id, TUE, TUE) == []
 
 
 async def test_add_entry_without_data_asks_again() -> None:
-    reply = await chat.dispatch(Intent(action="add_entry", text="disfraz"), today=MON, chat_id=1)
+    reply = await chat.dispatch(
+        await a_scope(), Intent(action="add_entry", text="disfraz"), today=MON, chat_id=1
+    )
     assert reply.edit is None
     assert "¿Para qué día" in reply.text
 
@@ -174,6 +190,7 @@ async def test_add_entry_without_data_asks_again() -> None:
 async def test_remove_single_candidate_asks_for_confirmation() -> None:
     await seed((WED, "event", "salida al parque"))
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="remove_entry", date_from=WED, target_entry_hint="salida"),
         today=MON,
         chat_id=1,
@@ -181,12 +198,13 @@ async def test_remove_single_candidate_asks_for_confirmation() -> None:
     assert reply.edit is not None and reply.edit["action"] == "remove"
     assert reply.candidates is None
     assert "¿Quito" in reply.text
-    assert (await repo.active_entries(WED, WED))[0].is_active is True
+    assert (await repo.active_entries(TENANT.child_id, WED, WED))[0].is_active is True
 
 
 async def test_remove_several_candidates_offers_a_choice() -> None:
     await seed((WED, "bring", "sudadera"), (WED, "bring", "botella"), (WED, "note", "x"))
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="remove_entry", date_from=WED),
         today=MON,
         chat_id=1,
@@ -199,6 +217,7 @@ async def test_remove_several_candidates_offers_a_choice() -> None:
 async def test_remove_hint_without_matches_falls_back_to_the_whole_day() -> None:
     await seed((WED, "bring", "sudadera"))
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="remove_entry", date_from=WED, target_entry_hint="paraguas rojo"),
         today=MON,
         chat_id=1,
@@ -207,18 +226,23 @@ async def test_remove_hint_without_matches_falls_back_to_the_whole_day() -> None
 
 
 async def test_remove_with_nothing_there() -> None:
-    reply = await chat.dispatch(Intent(action="remove_entry", date_from=WED), today=MON, chat_id=1)
+    reply = await chat.dispatch(
+        await a_scope(), Intent(action="remove_entry", date_from=WED), today=MON, chat_id=1
+    )
     assert "No encontré nada" in reply.text
     assert reply.edit is None
 
 
 async def test_help_and_unknown() -> None:
     assert (
-        "agenda escolar" in (await chat.dispatch(Intent(action="help"), today=MON, chat_id=1)).text
+        "agenda escolar"
+        in (await chat.dispatch(await a_scope(), Intent(action="help"), today=MON, chat_id=1)).text
     )
     assert (
         "No te entendí"
-        in (await chat.dispatch(Intent(action="unknown"), today=MON, chat_id=1)).text
+        in (
+            await chat.dispatch(await a_scope(), Intent(action="unknown"), today=MON, chat_id=1)
+        ).text
     )
 
 
@@ -228,7 +252,7 @@ async def test_help_and_unknown() -> None:
 async def seed_schedule(anchor: date = date(2026, 8, 31)) -> None:
     from app.llm.schemas import ScheduleDraft, SlotDraft
 
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=1)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=1, child_id=TENANT.child_id)
     await agenda.apply_source(
         source.pk,
         ExtractionResult(
@@ -253,6 +277,7 @@ async def seed_schedule(anchor: date = date(2026, 8, 31)) -> None:
 async def test_query_subject_answers_when_a_class_happens() -> None:
     await seed_schedule()
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_subject", subject="natación"),
         today=MON,
         chat_id=1,
@@ -265,6 +290,7 @@ async def test_query_subject_answers_when_a_class_happens() -> None:
 async def test_query_subject_ignores_accents() -> None:
     await seed_schedule()
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_subject", subject="NATACION"),
         today=MON,
         chat_id=1,
@@ -274,6 +300,7 @@ async def test_query_subject_ignores_accents() -> None:
 
 async def test_query_subject_without_a_schedule_says_so() -> None:
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_subject", subject="natación"),
         today=MON,
         chat_id=1,
@@ -284,6 +311,7 @@ async def test_query_subject_without_a_schedule_says_so() -> None:
 async def test_query_subject_for_something_not_in_the_schedule() -> None:
     await seed_schedule()
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_subject", subject="ajedrez"),
         today=MON,
         chat_id=1,
@@ -292,7 +320,9 @@ async def test_query_subject_for_something_not_in_the_schedule() -> None:
 
 
 async def test_query_subject_without_a_subject_asks_for_one() -> None:
-    reply = await chat.dispatch(Intent(action="query_subject"), today=MON, chat_id=1)
+    reply = await chat.dispatch(
+        await a_scope(), Intent(action="query_subject"), today=MON, chat_id=1
+    )
     assert "¿De qué materia?" in reply.text
 
 
@@ -301,6 +331,7 @@ async def test_a_single_day_query_includes_the_class() -> None:
     await seed_schedule()
     await seed((date(2026, 9, 10), "bring", "gorro de piscina"))
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_range", date_from=date(2026, 9, 10), date_to=date(2026, 9, 10)),
         today=MON,
         chat_id=1,
@@ -313,6 +344,7 @@ async def test_a_single_day_query_includes_the_class() -> None:
 async def test_a_day_with_only_a_class_is_not_empty() -> None:
     await seed_schedule()
     reply = await chat.dispatch(
+        await a_scope(),
         Intent(action="query_range", date_from=date(2026, 9, 10), date_to=date(2026, 9, 10)),
         today=MON,
         chat_id=1,

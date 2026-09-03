@@ -24,13 +24,18 @@ from django.db.models import Count, F, Q, Sum
 from app.db.models import (
     AgendaEntry,
     CalendarException,
+    Child,
     ConversationMessage,
+    Family,
     LLMCacheEntry,
     LLMCall,
+    Membership,
+    MembershipRole,
     NotificationKind,
     NotificationLog,
     ScheduleSlot,
     ScheduleTemplate,
+    School,
     Source,
     SourceKind,
     SourceStatus,
@@ -84,6 +89,71 @@ async def ensure_superuser(username: str, password: str, email: str = "") -> boo
     return True
 
 
+# --- Inquilino: quién es quién ------------------------------------------------------------
+#
+# El chat determina el niño, así que casi todo el ámbito se resuelve desde el `chat_id` que
+# ya traen los handlers. Nada de esto adivina: si el chat no está vinculado, no hay niño y
+# quien llame decide qué hacer.
+
+
+async def child_for_chat(chat_id: int) -> Child | None:
+    """El niño de este chat, o None si el chat no está vinculado a ninguno."""
+    return (
+        await Child.objects.select_related("family", "school")
+        .filter(chat_id=chat_id, is_active=True)
+        .afirst()
+    )
+
+
+async def get_child(child_id: int) -> Child | None:
+    return await Child.objects.select_related("family", "school").filter(pk=child_id).afirst()
+
+
+async def children_of(family_id: int) -> list[Child]:
+    qs = (
+        Child.objects.select_related("school")
+        .filter(family_id=family_id, is_active=True)
+        .order_by("name")
+    )
+    return [child async for child in qs]
+
+
+async def active_children() -> list[Child]:
+    """Todos los niños activos con chat. Lo usan los barridos programados."""
+    qs = (
+        Child.objects.select_related("family", "school")
+        .filter(is_active=True, chat_id__isnull=False)
+        .order_by("id")
+    )
+    return [child async for child in qs]
+
+
+async def families_of(telegram_user_id: int) -> list[Family]:
+    qs = Family.objects.filter(memberships__user_id=telegram_user_id, is_active=True).order_by("id")
+    return [family async for family in qs]
+
+
+async def is_member(telegram_user_id: int, family_id: int) -> bool:
+    return await Membership.objects.filter(user_id=telegram_user_id, family_id=family_id).aexists()
+
+
+async def create_family(name: str, *, owner: User | None = None) -> Family:
+    family = await Family.objects.acreate(name=name)
+    if owner is not None:
+        await Membership.objects.acreate(family=family, user=owner, role=MembershipRole.OWNER)
+    return family
+
+
+async def create_school(family_id: int, name: str, **fields: Any) -> School:
+    return await School.objects.acreate(family_id=family_id, name=name, **fields)
+
+
+async def create_child(family_id: int, school_id: int, name: str, **fields: Any) -> Child:
+    return await Child.objects.acreate(
+        family_id=family_id, school_id=school_id, name=name, **fields
+    )
+
+
 # --- Usuarios y fuentes -----------------------------------------------------------------
 
 
@@ -104,12 +174,14 @@ async def get_user(telegram_user_id: int) -> User | None:
 async def create_source(
     kind: SourceKind,
     *,
+    child_id: int,
     telegram_file_id: str | None = None,
     submitted_by: User | None = None,
     chat_id: int | None = None,
     caption: str | None = None,
 ) -> Source:
     return await Source.objects.acreate(
+        child_id=child_id,
         kind=kind,
         telegram_file_id=telegram_file_id,
         submitted_by=submitted_by,
@@ -173,13 +245,18 @@ async def clear_local_path(source_id: int) -> None:
     await Source.objects.filter(pk=source_id).aupdate(local_path=None)
 
 
-async def recent_sources(limit: int = 3) -> list[Source]:
-    qs = Source.objects.select_related("submitted_by").order_by("-id")[:limit]
+async def recent_sources(family_id: int, limit: int = 3) -> list[Source]:
+    qs = (
+        Source.objects.select_related("submitted_by")
+        .filter(child__family_id=family_id)
+        .order_by("-id")[:limit]
+    )
     return [source async for source in qs]
 
 
-async def count_awaiting_extraction() -> int:
+async def count_awaiting_extraction(family_id: int) -> int:
     return await Source.objects.filter(
+        child__family_id=family_id,
         kind=SourceKind.PHOTO,
         status=SourceStatus.PENDING,
         raw_llm_output__isnull=True,
@@ -205,22 +282,31 @@ async def set_source_status(source_id: int, status: SourceStatus) -> None:
 def _apply_source_entries(source_id: int, entries: list[ExtractedEntry]) -> tuple[int, int]:
     """Merge por fecha (sección 5 del plan), todo en una transacción.
 
-    Para cada fecha cubierta desactiva las entradas activas previas marcándolas como
-    reemplazadas por esta source, inserta las nuevas y confirma la source.
+    Para cada fecha cubierta desactiva las entradas activas previas **de ese niño**,
+    marcándolas como reemplazadas por esta source, inserta las nuevas y confirma la source.
     Devuelve (insertadas, reemplazadas).
+
+    El filtro por niño no es opcional: sin él, confirmar una foto desactivaría las entradas
+    de todas las demás familias en esas fechas.
     """
     with transaction.atomic():
         source = Source.objects.select_for_update().get(pk=source_id)
         dates = {entry.entry_date for entry in entries}
         superseded = (
-            AgendaEntry.objects.filter(entry_date__in=dates, is_active=True)
+            AgendaEntry.objects.filter(
+                child_id=source.child_id, entry_date__in=dates, is_active=True
+            )
             .exclude(source_id=source_id)
             .update(is_active=False, superseded_by=source)
         )
         created = AgendaEntry.objects.bulk_create(
             [
                 AgendaEntry(
-                    entry_date=entry.entry_date, kind=entry.kind, text=entry.text, source=source
+                    child_id=source.child_id,
+                    entry_date=entry.entry_date,
+                    kind=entry.kind,
+                    text=entry.text,
+                    source=source,
                 )
                 for entry in entries
             ]
@@ -234,11 +320,11 @@ async def apply_source_entries(source_id: int, entries: list[ExtractedEntry]) ->
     return await sync_to_async(_apply_source_entries)(source_id, entries)
 
 
-async def active_entries(date_from: date, date_to: date) -> list[AgendaEntry]:
-    """Entradas vigentes en [date_from, date_to], ordenadas por fecha, tipo e id."""
+async def active_entries(child_id: int, date_from: date, date_to: date) -> list[AgendaEntry]:
+    """Entradas vigentes de un niño en [date_from, date_to], por fecha, tipo e id."""
     qs = (
         AgendaEntry.objects.filter(
-            is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
+            child_id=child_id, is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
         )
         .select_related("source")
         .order_by("entry_date", "kind", "id")
@@ -251,11 +337,11 @@ async def entries_for_source(source_id: int) -> list[AgendaEntry]:
     return [entry async for entry in qs]
 
 
-async def active_dates(date_from: date, date_to: date) -> set[date]:
-    """Fechas de [date_from, date_to] con al menos una entrada vigente."""
+async def active_dates(child_id: int, date_from: date, date_to: date) -> set[date]:
+    """Fechas de [date_from, date_to] con al menos una entrada vigente de ese niño."""
     qs = (
         AgendaEntry.objects.filter(
-            is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
+            child_id=child_id, is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
         )
         .values_list("entry_date", flat=True)
         .distinct()
@@ -271,7 +357,11 @@ def _add_single_entry(source_id: int, entry: ExtractedEntry) -> AgendaEntry:
     with transaction.atomic():
         source = Source.objects.select_for_update().get(pk=source_id)
         created = AgendaEntry.objects.create(
-            entry_date=entry.entry_date, kind=entry.kind, text=entry.text, source=source
+            child_id=source.child_id,
+            entry_date=entry.entry_date,
+            kind=entry.kind,
+            text=entry.text,
+            source=source,
         )
         source.status = SourceStatus.CONFIRMED
         source.save(update_fields=["status"])
@@ -282,11 +372,11 @@ async def add_single_entry(source_id: int, entry: ExtractedEntry) -> AgendaEntry
     return await sync_to_async(_add_single_entry)(source_id, entry)
 
 
-def _deactivate_entry(entry_id: int, source_id: int) -> bool:
+def _deactivate_entry(entry_id: int, source_id: int, child_id: int) -> bool:
     """Baja por texto: desactiva solo esa entrada, referenciando la source que la quitó."""
     with transaction.atomic():
         source = Source.objects.select_for_update().get(pk=source_id)
-        updated = AgendaEntry.objects.filter(pk=entry_id, is_active=True).update(
+        updated = AgendaEntry.objects.filter(pk=entry_id, child_id=child_id, is_active=True).update(
             is_active=False, superseded_by=source
         )
         source.status = SourceStatus.CONFIRMED
@@ -294,16 +384,16 @@ def _deactivate_entry(entry_id: int, source_id: int) -> bool:
         return bool(updated)
 
 
-async def deactivate_entry(entry_id: int, source_id: int) -> bool:
-    return await sync_to_async(_deactivate_entry)(entry_id, source_id)
+async def deactivate_entry(entry_id: int, source_id: int, *, child_id: int) -> bool:
+    return await sync_to_async(_deactivate_entry)(entry_id, source_id, child_id)
 
 
 async def find_active_entries(
-    date_from: date, date_to: date, hint: str | None = None
+    child_id: int, date_from: date, date_to: date, hint: str | None = None
 ) -> list[AgendaEntry]:
-    """Candidatas a borrar: vigentes en el rango, filtradas por texto si hay pista."""
+    """Candidatas a borrar: vigentes del niño en el rango, filtradas por texto si hay pista."""
     qs = AgendaEntry.objects.filter(
-        is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
+        child_id=child_id, is_active=True, entry_date__gte=date_from, entry_date__lte=date_to
     )
     if hint:
         # Palabras de 4+ letras de la pista; ILIKE por cada una (OR).
@@ -316,8 +406,10 @@ async def find_active_entries(
     return [entry async for entry in qs.order_by("entry_date", "kind", "id")]
 
 
-async def get_entry(entry_id: int) -> AgendaEntry | None:
-    return await AgendaEntry.objects.filter(pk=entry_id).afirst()
+async def get_entry(entry_id: int, *, child_id: int) -> AgendaEntry | None:
+    """Una entrada **de ese niño**. El id llega de un botón de Telegram, así que no basta
+    con buscar por clave primaria: hay que comprobar de quién es."""
+    return await AgendaEntry.objects.filter(pk=entry_id, child_id=child_id).afirst()
 
 
 # --- Historial de conversación ------------------------------------------------------------
@@ -340,24 +432,42 @@ async def recent_history(chat_id: int, limit: int = 6) -> list[ChatTurn]:
 
 
 async def notification_sent_ok(
-    kinds: Sequence[NotificationKind], target_date: date, chat_id: int
+    kinds: Sequence[NotificationKind], target_date: date, chat_id: int, child_id: int | None = None
 ) -> bool:
     """True si ya hubo un envío correcto de alguno de esos tipos para esa fecha y chat."""
-    return await NotificationLog.objects.filter(
+    qs = NotificationLog.objects.filter(
         kind__in=list(kinds), target_date=target_date, chat_id=chat_id, ok=True
-    ).aexists()
+    )
+    # `child_id=None` es un valor legítimo (avisos que no son de un niño concreto), y el
+    # unique parcial usa `nulls_distinct=False`, así que se filtra explícitamente.
+    qs = qs.filter(child_id__isnull=True) if child_id is None else qs.filter(child_id=child_id)
+    return await qs.aexists()
 
 
 async def log_notification(
-    kind: NotificationKind, target_date: date, chat_id: int, *, ok: bool, error: str | None
+    kind: NotificationKind,
+    target_date: date,
+    chat_id: int,
+    *,
+    ok: bool,
+    error: str | None,
+    child_id: int | None = None,
 ) -> None:
     await NotificationLog.objects.acreate(
-        kind=kind, target_date=target_date, chat_id=chat_id, ok=ok, error=error
+        kind=kind,
+        target_date=target_date,
+        chat_id=chat_id,
+        child_id=child_id,
+        ok=ok,
+        error=error,
     )
 
 
-async def last_notification() -> NotificationLog | None:
-    return await NotificationLog.objects.order_by("-sent_at", "-id").afirst()
+async def last_notification(child_id: int | None = None) -> NotificationLog | None:
+    qs = NotificationLog.objects.all()
+    if child_id is not None:
+        qs = qs.filter(child_id=child_id)
+    return await qs.order_by("-sent_at", "-id").afirst()
 
 
 async def notifications(kind: NotificationKind | None = None) -> list[NotificationLog]:
@@ -381,8 +491,10 @@ async def log_llm_call(
     model: str | None = None,
     prompt: str | None = None,
     response: dict[str, Any] | None = None,
+    family_id: int | None = None,
 ) -> None:
     await LLMCall.objects.acreate(
+        family_id=family_id,
         provider=provider,
         task=task,
         model=usage.model if usage else model,
@@ -457,10 +569,10 @@ async def cache_entries() -> list[LLMCacheEntry]:
     return [entry async for entry in LLMCacheEntry.objects.order_by("id")]
 
 
-async def llm_usage_by_provider(since: datetime) -> list[dict[str, Any]]:
+async def llm_usage_by_provider(family_id: int, since: datetime) -> list[dict[str, Any]]:
     """Consumo agregado por proveedor desde `since`, para /estado."""
     qs = (
-        LLMCall.objects.filter(created_at__gte=since)
+        LLMCall.objects.filter(family_id=family_id, created_at__gte=since)
         .values("provider")
         .annotate(
             calls=Count("id"),
@@ -475,10 +587,10 @@ async def llm_usage_by_provider(since: datetime) -> list[dict[str, Any]]:
     return [dict(row) async for row in qs]
 
 
-async def last_call_by_provider() -> dict[str, LLMCall]:
+async def last_call_by_provider(family_id: int) -> dict[str, LLMCall]:
     """Última llamada de cada proveedor: salud observada sin gastar un token."""
     latest: dict[str, LLMCall] = {}
-    qs = LLMCall.objects.order_by("-id")[:200]
+    qs = LLMCall.objects.filter(family_id=family_id).order_by("-id")[:200]
     async for call in qs:
         latest.setdefault(call.provider, call)
     return latest
@@ -545,8 +657,10 @@ def _apply_schedule(
     with transaction.atomic():
         source = Source.objects.select_for_update().get(pk=source_id)
         if replace_ids:
+            # `pk__in` viene de un botón: se acota al niño de la source para que un
+            # callback manipulado no pueda reemplazar el horario de otra familia.
             for old in ScheduleTemplate.objects.select_for_update().filter(
-                pk__in=replace_ids, is_active=True
+                pk__in=replace_ids, child_id=source.child_id, is_active=True
             ):
                 old.is_active = False
                 old.superseded_by = source
@@ -554,6 +668,7 @@ def _apply_schedule(
                 old.save(update_fields=["is_active", "superseded_by", "valid_to"])
         labels = _week_labels(draft)
         template = ScheduleTemplate.objects.create(
+            child_id=source.child_id,
             name=draft.name or "Horario",
             anchor_monday=draft.anchor_monday,
             cycle_weeks=draft.cycle_weeks,
@@ -607,17 +722,17 @@ def _unique_slots(draft: ScheduleDraft) -> list[SlotDraft]:
     return list(seen.values())
 
 
-async def active_schedules(day: date | None = None) -> list[ScheduleTemplate]:
-    """Todas las plantillas vigentes ese día. Pueden convivir varias."""
-    qs = ScheduleTemplate.objects.filter(is_active=True)
+async def active_schedules(child_id: int, day: date | None = None) -> list[ScheduleTemplate]:
+    """Plantillas vigentes de ese niño. Pueden convivir varias (rotación + jornada extendida)."""
+    qs = ScheduleTemplate.objects.filter(child_id=child_id, is_active=True)
     if day is not None:
         qs = qs.filter(valid_from__lte=day).filter(Q(valid_to__isnull=True) | Q(valid_to__gte=day))
     return [t async for t in qs.order_by("id")]
 
 
-async def active_schedule(day: date | None = None) -> ScheduleTemplate | None:
+async def active_schedule(child_id: int, day: date | None = None) -> ScheduleTemplate | None:
     """La primera plantilla vigente. Usar `active_schedules` salvo que baste con saber si hay."""
-    schedules = await active_schedules(day)
+    schedules = await active_schedules(child_id, day)
     return schedules[0] if schedules else None
 
 
@@ -639,15 +754,17 @@ async def schedule_slots(schedule_id: int) -> list[ScheduleSlot]:
     return [slot async for slot in qs]
 
 
-async def calendar_exceptions() -> dict[date, tuple[str, str]]:
-    """Día -> (tipo, motivo). Son pocas filas al año: se cargan enteras."""
-    qs = CalendarException.objects.all().order_by("day")
+async def calendar_exceptions(school_id: int) -> dict[date, tuple[str, str]]:
+    """Día -> (tipo, motivo) de un colegio. Los hermanos del mismo colegio lo comparten."""
+    qs = CalendarException.objects.filter(school_id=school_id).order_by("day")
     return {row.day: (row.kind, row.label) async for row in qs}
 
 
-async def add_calendar_exception(day: date, kind: str, label: str) -> CalendarException:
+async def add_calendar_exception(
+    school_id: int, day: date, kind: str, label: str
+) -> CalendarException:
     row, _ = await CalendarException.objects.aupdate_or_create(
-        day=day, defaults={"kind": kind, "label": label}
+        school_id=school_id, day=day, defaults={"kind": kind, "label": label}
     )
     return row
 

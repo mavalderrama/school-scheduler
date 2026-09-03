@@ -15,10 +15,20 @@ import pytest
 from app.config import Settings
 from app.db import repo
 from app.db.models import NotificationKind
-from app.services import ha, notify
+from app.services import ha, notify, scope
+from app.services.scope import Scope
+from tests.conftest import TENANT
 from tests.test_notify import FakeSender, seed
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+async def a_scope() -> Scope:
+    """El ámbito de la familia por defecto de los tests."""
+    found = await scope.for_child(TENANT.child_id)
+    assert found is not None
+    return found
+
 
 MON, TUE = date(2026, 9, 7), date(2026, 9, 8)
 
@@ -84,7 +94,7 @@ async def test_telegram_failing_falls_back_to_ha(
     await seed((TUE, "bring", "sudadera"))
     send = FakeSender(fail_for={-100999})
 
-    outcomes = await notify.send_daily(send, with_ha(settings), MON)
+    outcomes = await notify.send_daily(send, with_ha(settings), MON, scope=await a_scope())
 
     assert [o.sent for o in outcomes] == [False]  # Telegram falló
     assert sent, "debería haberse avisado por Home Assistant"
@@ -99,7 +109,7 @@ async def test_without_ha_configured_nothing_changes(settings: Settings) -> None
     """Regresión: el camino de siempre no se toca."""
     await seed((TUE, "bring", "sudadera"))
     send = FakeSender(fail_for={-100999})
-    outcomes = await notify.send_daily(send, settings, MON)
+    outcomes = await notify.send_daily(send, settings, MON, scope=await a_scope())
 
     assert [o.sent for o in outcomes] == [False]
     logged = await repo.notifications(NotificationKind.DAILY)
@@ -116,7 +126,9 @@ async def test_ha_failing_too_does_not_break_the_job(
     await seed((TUE, "bring", "sudadera"))
     send = FakeSender(fail_for={-100999})
 
-    outcomes = await notify.send_daily(send, with_ha(settings), MON)  # no lanza
+    outcomes = await notify.send_daily(
+        send, with_ha(settings), MON, scope=await a_scope()
+    )  # no lanza
     assert [o.sent for o in outcomes] == [False]
     logged = await repo.notifications(NotificationKind.DAILY)
     assert logged and "HA: también falló" in (logged[0].error or "")

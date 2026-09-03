@@ -16,6 +16,7 @@ from app.db.models import AgendaEntry, SourceKind, SourceStatus
 from app.llm.schemas import ExtractedEntry, ExtractionResult
 from app.log import get_logger
 from app.services import cache
+from app.services.scope import Scope
 
 log = get_logger(__name__)
 
@@ -96,11 +97,13 @@ async def _apply_schedule(
 
 
 async def add_entry(
-    entry_date: date, kind: str, text: str, user_id: int | None = None
+    scope: Scope, entry_date: date, kind: str, text: str, user_id: int | None = None
 ) -> AgendaEntry:
     """Alta por texto: source `text_correction` + UNA entrada, sin tocar el resto del día."""
     user = await repo.get_user(user_id) if user_id is not None else None
-    source = await repo.create_source(SourceKind.TEXT_CORRECTION, submitted_by=user)
+    source = await repo.create_source(
+        SourceKind.TEXT_CORRECTION, child_id=scope.child_id, submitted_by=user
+    )
     entry = await repo.add_single_entry(
         source.pk,
         ExtractedEntry(entry_date=entry_date, kind=kind, text=text, confidence="high"),
@@ -109,11 +112,13 @@ async def add_entry(
     return entry
 
 
-async def remove_entry(entry_id: int, user_id: int | None = None) -> bool:
+async def remove_entry(scope: Scope, entry_id: int, user_id: int | None = None) -> bool:
     """Baja por texto: desactiva solo esa entrada, con `superseded_by` a la nueva source."""
     user = await repo.get_user(user_id) if user_id is not None else None
-    source = await repo.create_source(SourceKind.TEXT_CORRECTION, submitted_by=user)
-    removed = await repo.deactivate_entry(entry_id, source.pk)
+    source = await repo.create_source(
+        SourceKind.TEXT_CORRECTION, child_id=scope.child_id, submitted_by=user
+    )
+    removed = await repo.deactivate_entry(entry_id, source.pk, child_id=scope.child_id)
     log.info("entry_removed", entry_id=entry_id, source_id=source.pk, removed=removed)
     return removed
 

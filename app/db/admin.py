@@ -16,13 +16,17 @@ from django.utils.html import format_html
 from app.db.models import (
     AgendaEntry,
     CalendarException,
+    Child,
     ConversationMessage,
+    Family,
     GraphThread,
     LLMCacheEntry,
     LLMCall,
+    Membership,
     NotificationLog,
     ScheduleSlot,
     ScheduleTemplate,
+    School,
     Source,
     User,
 )
@@ -267,3 +271,48 @@ class GraphThreadAdmin(ReadOnlyMixin, admin.ModelAdmin[GraphThread]):
     @admin.display(description="actualizado")
     def actualizado(self, obj: GraphThread) -> str:
         return str((obj.checkpoint or {}).get("ts", "—"))
+
+
+class ChildInline(admin.TabularInline[Child, Family]):
+    model = Child
+    extra = 0
+    fields = ["name", "school", "chat_id", "is_active"]
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        return False
+
+
+class MembershipInline(admin.TabularInline[Membership, Family]):
+    """Quién puede ver esta familia. Sustituye a la whitelist del `.env`."""
+
+    model = Membership
+    extra = 0
+    fields = ["user", "role"]
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        return False
+
+
+@admin.register(Family)
+class FamilyAdmin(NoDeleteMixin, admin.ModelAdmin[Family]):
+    list_display = ["name", "is_active", "created_at"]
+    list_filter = ["is_active"]
+    search_fields = ["name"]
+    inlines = [ChildInline, MembershipInline]
+
+
+@admin.register(School)
+class SchoolAdmin(NoDeleteMixin, admin.ModelAdmin[School]):
+    """El país y la zona horaria viven aquí, no en la configuración global: dos familias
+    pueden estar en ciudades distintas."""
+
+    list_display = ["name", "family", "city", "country", "timezone"]
+    list_filter = ["country"]
+    search_fields = ["name", "city"]
+
+
+@admin.register(Child)
+class ChildAdmin(NoDeleteMixin, admin.ModelAdmin[Child]):
+    list_display = ["name", "family", "school", "chat_id", "is_active"]
+    list_filter = ["is_active", "school"]
+    search_fields = ["name"]

@@ -40,6 +40,8 @@ class GraphState(TypedDict, total=False):
     """Estado conversacional de un chat. `thread_id` del grafo = `str(chat_id)`."""
 
     chat_id: int
+    child_id: int
+    """De qué niño es esta conversación. Se resuelve del chat al arrancar el hilo."""
     flow: Flow
 
     # --- Flujo de la foto ---

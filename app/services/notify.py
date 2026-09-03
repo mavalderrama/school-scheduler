@@ -23,6 +23,7 @@ from app.log import get_logger
 from app.services import ha, schoolcal
 from app.services import schedule as schedule_service
 from app.services.schedule import SlotResult
+from app.services.scope import Scope
 
 log = get_logger(__name__)
 
@@ -119,12 +120,12 @@ def format_gaps(gaps: Sequence[date]) -> str:
 
 
 async def build_daily_message(
-    target: date, *, country: str = "CO", use_schedule: bool = True
+    scope: Scope, target: date, *, use_schedule: bool = True
 ) -> tuple[NotificationKind, str]:
     """Lo de mañana. El horario cuenta como contenido: si hay clase (o si mañana es festivo)
     hay algo que decir, y el aviso de agenda vacía deja de ser la única opción."""
-    entries = await repo.active_entries(target, target)
-    slots = await schedule_service.resolve_day(target, country=country) if use_schedule else []
+    entries = await repo.active_entries(scope.child_id, target, target)
+    slots = await schedule_service.resolve_day(scope, target) if use_schedule else []
     if entries or slots:
         return NotificationKind.DAILY, format_daily(target, entries, slots)
     return NotificationKind.NUDGE_EMPTY, format_nudge(target)
@@ -142,10 +143,11 @@ async def _send_to_chats(
     target: date,
     text: str,
     settings: Settings | None = None,
+    child_id: int | None = None,
 ) -> list[Outcome]:
     outcomes: list[Outcome] = []
     for chat_id in chat_ids:
-        if await repo.notification_sent_ok(idempotency_kinds, target, chat_id):
+        if await repo.notification_sent_ok(idempotency_kinds, target, chat_id, child_id):
             log.info("notify_skipped", kind=kind, target=target.isoformat(), chat_id=chat_id)
             outcomes.append(Outcome(chat_id, kind, sent=False, skipped=True))
             continue
@@ -161,7 +163,9 @@ async def _send_to_chats(
             if settings is not None and ha.configured(settings):
                 relayed = await ha.notify(settings, _plain(text))
                 error += " | HA: enviado" if relayed else " | HA: también falló"
-        await repo.log_notification(kind, target, chat_id, ok=error is None, error=error)
+        await repo.log_notification(
+            kind, target, chat_id, ok=error is None, error=error, child_id=child_id
+        )
         log.info(
             "notify_sent", kind=kind, target=target.isoformat(), chat_id=chat_id, ok=error is None
         )
@@ -169,54 +173,69 @@ async def _send_to_chats(
     return outcomes
 
 
-async def send_daily(send: Sender, settings: Settings, today: date) -> list[Outcome]:
-    """Notificación de las 19:00: lo de mañana, o el aviso de agenda vacía."""
-    exceptions = await repo.calendar_exceptions()
+async def send_daily(
+    send: Sender, settings: Settings, today: date, *, scope: Scope
+) -> list[Outcome]:
+    """Notificación diaria de **un niño**: lo de mañana, o el aviso de agenda vacía.
+
+    El bucle por niños lo hace el planificador, no esto: aquí el ámbito ya viene resuelto,
+    con su colegio, su país y su zona horaria.
+    """
+    exceptions = await repo.calendar_exceptions(scope.school_id)
     target = daily_target(
         today,
         exceptions=exceptions,
-        country=settings.school_country,
+        country=scope.country,
         skip_non_school=settings.skip_weekend,
     )
     if target is None:
         info = schoolcal.day_info(
-            today + timedelta(days=1), exceptions=exceptions, country=settings.school_country
+            today + timedelta(days=1), exceptions=exceptions, country=scope.country
         )
-        log.info("notify_skip_non_school_day", today=today.isoformat(), reason=info.reason)
+        log.info(
+            "notify_skip_non_school_day",
+            child=scope.child_id,
+            today=today.isoformat(),
+            reason=info.reason,
+        )
         return []
-    kind, text = await build_daily_message(
-        target, country=settings.school_country, use_schedule=settings.schedule_enabled
-    )
+    kind, text = await build_daily_message(scope, target, use_schedule=settings.schedule_enabled)
+    chats = [scope.chat_id] if scope.chat_id is not None else []
     return await _send_to_chats(
         send,
-        settings.notify_chat_ids,
+        chats,
         kind=kind,
         idempotency_kinds=DAILY_KINDS,
         target=target,
         text=text,
         settings=settings,
+        child_id=scope.child_id,
     )
 
 
-async def send_gap_check(send: Sender, settings: Settings, today: date) -> list[Outcome]:
-    """Domingo: días hábiles de la próxima semana sin entradas vigentes."""
+async def send_gap_check(
+    send: Sender, settings: Settings, today: date, *, scope: Scope
+) -> list[Outcome]:
+    """Domingo: días hábiles de la próxima semana sin entradas vigentes de ese niño."""
     week = next_week_days(today)
-    exceptions = await repo.calendar_exceptions()
-    days = next_week_school_days(today, exceptions=exceptions, country=settings.school_country)
+    exceptions = await repo.calendar_exceptions(scope.school_id)
+    days = next_week_school_days(today, exceptions=exceptions, country=scope.country)
     if not days:
         log.info("gap_check_no_school_week", week_of=week[0].isoformat())
         return []
-    covered = await repo.active_dates(days[0], days[-1])
+    covered = await repo.active_dates(scope.child_id, days[0], days[-1])
     gaps = [d for d in days if d not in covered]
     if not gaps:
         log.info("gap_check_clean", week_of=week[0].isoformat())
         return []
+    chats = [scope.chat_id] if scope.chat_id is not None else []
     return await _send_to_chats(
         send,
-        settings.notify_chat_ids,
+        chats,
         kind=NotificationKind.GAP_CHECK,
         idempotency_kinds=(NotificationKind.GAP_CHECK,),
         target=week[0],
         text=format_gaps(gaps),
         settings=settings,
+        child_id=scope.child_id,
     )

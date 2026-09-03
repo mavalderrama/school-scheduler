@@ -25,6 +25,7 @@ from app.llm.provider import LLMError
 from app.llm.schemas import ExtractionResult, QAPair
 from app.log import get_logger
 from app.services import agenda, chat, ingest
+from app.services import scope as scope_service
 
 log = get_logger(__name__)
 
@@ -32,6 +33,14 @@ ASK = "ask"
 SUMMARY = "summary"
 CORRECTION = "correction"
 EDIT = "edit"
+
+
+async def _scope(state: GraphState) -> scope_service.Scope:
+    """El ámbito del niño de este hilo. Si desapareciera, es un fallo de programación."""
+    found = await scope_service.for_child(state["child_id"])
+    if found is None:
+        raise ValueError(f"el niño {state.get('child_id')} ya no existe")
+    return found
 
 
 def _extraction(state: GraphState) -> ExtractionResult:
@@ -78,6 +87,7 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
             user_id=photo["user_id"],
             display_name=photo["display_name"],
             chat_id=state["chat_id"],
+            child_id=state["child_id"],
             download=ctx.download,
             settings=ctx.settings,
             providers=ctx.providers,
@@ -147,7 +157,8 @@ async def present(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
     extraction = _extraction(state)
     existing: list[tuple[int, str]] = []
     if extraction.doc_type == "schedule":
-        existing = [(t.pk, t.name) for t in await repo.active_schedules()]
+        sc = await _scope(state)
+        existing = [(t.pk, t.name) for t in await repo.active_schedules(sc.child_id)]
 
     decision = interrupt(
         {
@@ -182,7 +193,6 @@ async def correct(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
 
 async def apply_photo(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str, Any]:
     """Confirma la extracción. `replace_ids` sale del botón, no de una suposición."""
-    ctx = runtime.context
     source_id = state.get("source_id")
     if source_id is None:
         return {"error": "no hay foto pendiente"}
@@ -190,12 +200,16 @@ async def apply_photo(state: GraphState, runtime: Runtime[GraphContext]) -> dict
     decision = state.get("decision") or {}
     replace_ids = decision.get("replace_ids", []) if isinstance(decision, dict) else []
 
+    sc = await _scope(state)
     replaced = None
     if replace_ids:
-        old = next((t for t in await repo.active_schedules() if t.pk in set(replace_ids)), None)
+        mine = await repo.active_schedules(sc.child_id)
+        old = next((t for t in mine if t.pk in set(replace_ids)), None)
         replaced = old.name if old is not None else None
+        # Un `replace_ids` que no sea del niño simplemente no reemplaza nada.
+        replace_ids = [t.pk for t in mine if t.pk in set(replace_ids)]
 
-    today = datetime.now(ctx.settings.zoneinfo).date()
+    today = datetime.now(sc.zoneinfo).date()
     result = await agenda.apply_source(source_id, extraction, today=today, replace_ids=replace_ids)
     draft = extraction.schedule
     if result.schedule_id is not None and draft is not None and draft.anchor_monday is not None:
@@ -231,8 +245,10 @@ async def apply_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dict[
     user_id = state.get("user_id")
     entry_id = decision.get("entry_id") if isinstance(decision, dict) else None
 
+    sc = await _scope(state)
     if edit.get("action") == "add":
         added = await agenda.add_entry(
+            sc,
             date.fromisoformat(edit["entry_date"]),
             edit.get("kind") or "note",
             edit.get("text") or "",
@@ -243,8 +259,8 @@ async def apply_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dict[
     target = entry_id or edit.get("entry_id")
     if target is None:
         return {"reply": "No sé cuál quitar. Vuelve a pedírmelo, por favor."}
-    found = await repo.get_entry(int(target))
+    found = await repo.get_entry(int(target), child_id=sc.child_id)
     if found is None or not found.is_active:
         return {"reply": "Esa entrada ya no está vigente."}
-    await agenda.remove_entry(found.pk, user_id)
+    await agenda.remove_entry(sc, found.pk, user_id)
     return {"reply": compose.format_removed(found)}

@@ -27,7 +27,7 @@ from app.db import repo
 from app.graph.runner import GraphRunner
 from app.llm.provider import LLMProviders
 from app.log import get_logger
-from app.services import notify
+from app.services import notify, scope
 
 log = get_logger(__name__)
 
@@ -63,16 +63,27 @@ def telegram_sender(bot: Bot) -> notify.Sender:
 
 @db_job
 async def daily_notify_job(bot: Bot, settings: Settings) -> None:
-    today = datetime.now(settings.zoneinfo).date()
-    outcomes = await notify.send_daily(telegram_sender(bot), settings, today)
-    log.info("daily_notify_done", sent=sum(o.sent for o in outcomes), total=len(outcomes))
+    """Un aviso por niño. Cada uno con la zona horaria y el calendario de **su** colegio."""
+    sent = total = 0
+    for child in await repo.active_children():
+        sc = scope.of(child)
+        today = datetime.now(sc.zoneinfo).date()
+        outcomes = await notify.send_daily(telegram_sender(bot), settings, today, scope=sc)
+        sent += sum(o.sent for o in outcomes)
+        total += len(outcomes)
+    log.info("daily_notify_done", sent=sent, total=total)
 
 
 @db_job
 async def gap_check_job(bot: Bot, settings: Settings) -> None:
-    today = datetime.now(settings.zoneinfo).date()
-    outcomes = await notify.send_gap_check(telegram_sender(bot), settings, today)
-    log.info("gap_check_done", sent=sum(o.sent for o in outcomes), total=len(outcomes))
+    sent = total = 0
+    for child in await repo.active_children():
+        sc = scope.of(child)
+        today = datetime.now(sc.zoneinfo).date()
+        outcomes = await notify.send_gap_check(telegram_sender(bot), settings, today, scope=sc)
+        sent += sum(o.sent for o in outcomes)
+        total += len(outcomes)
+    log.info("gap_check_done", sent=sent, total=total)
 
 
 @db_job

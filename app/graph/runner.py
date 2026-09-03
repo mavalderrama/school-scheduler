@@ -151,6 +151,7 @@ class GraphRunner:
             head, rest = queue[0], queue[1:]
             state: GraphState = {
                 "chat_id": chat_id,
+                "child_id": int(cast(int, snap.values.get("child_id", 0))),
                 "flow": "photo",
                 "photo": head,
                 "queue": rest,

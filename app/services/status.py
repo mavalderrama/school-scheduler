@@ -20,6 +20,7 @@ from app.llm.compose import format_date_es
 from app.llm.provider import LLMProviders
 from app.services import schedule as schedule_service
 from app.services import schoolcal
+from app.services.scope import Scope
 
 TOKEN_LIFETIME_DAYS = 365
 TOKEN_WARN_DAYS = 30
@@ -64,7 +65,7 @@ def _usage_lines(rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-async def build_status(settings: Settings, providers: LLMProviders) -> str:
+async def build_status(settings: Settings, providers: LLMProviders, *, scope: Scope) -> str:
     """Informe barato: solo consultas a la DB."""
     now = timezone.now()
     today = now.astimezone(settings.zoneinfo).date()
@@ -75,7 +76,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
     # Proveedores configurados y su última llamada conocida.
     lines.append(f"Visión: <code>{providers.vision.name}</code>")
     lines.append(f"Texto: <code>{providers.text.name}</code>")
-    last_calls = await repo.last_call_by_provider()
+    last_calls = await repo.last_call_by_provider(scope.family_id)
     if last_calls:
         lines.append("")
         lines.append("Última llamada por proveedor:")
@@ -90,7 +91,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
     # Horario rotativo: es lo primero que se mira cuando algo no cuadra por la mañana.
     if settings.schedule_enabled:
         lines.append("")
-        loaded = await schedule_service.load(today)
+        loaded = await schedule_service.load(scope, today)
         if loaded is None:
             lines.append("🗓️ Sin horario cargado.")
         else:
@@ -101,7 +102,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
                 f"({len(loaded.slots)} franjas). Esta semana es la <b>Semana {label}</b>."
             )
             free = schoolcal.next_non_school_day(
-                today, exceptions=loaded.exceptions, country=settings.school_country
+                today, exceptions=loaded.exceptions, country=scope.country
             )
             if free is not None:
                 lines.append(
@@ -111,7 +112,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
 
     # Notificaciones.
     lines.append("")
-    last = await repo.last_notification()
+    last = await repo.last_notification(scope.child_id)
     if last is None:
         lines.append("🔔 Todavía no he enviado ninguna notificación.")
     else:
@@ -120,7 +121,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
         lines.append(f"🔔 Última notificación: {mark} {last.kind} el {when}.")
 
     # Últimas fotos y correcciones.
-    sources = await repo.recent_sources(3)
+    sources = await repo.recent_sources(scope.family_id, 3)
     if sources:
         lines.append("")
         lines.append("📥 Últimas fuentes:")
@@ -133,7 +134,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
                 f"{html.escape(who)}, {provider}"
             )
 
-    waiting = await repo.count_awaiting_extraction()
+    waiting = await repo.count_awaiting_extraction(scope.family_id)
     if waiting:
         lines.append("")
         lines.append(f"⏳ {waiting} foto(s) esperando a que haya cuota; las reintento solo.")
@@ -144,7 +145,7 @@ async def build_status(settings: Settings, providers: LLMProviders) -> str:
         f"📊 Consumo desde el {month_start.astimezone(settings.zoneinfo).day}/"
         f"{month_start.astimezone(settings.zoneinfo).month}:"
     )
-    lines.extend(_usage_lines(await repo.llm_usage_by_provider(month_start)))
+    lines.extend(_usage_lines(await repo.llm_usage_by_provider(scope.family_id, month_start)))
 
     entries, hits = await repo.cache_stats()
     lines.append(f"  • caché: {entries} entrada(s), {hits} acierto(s) acumulados")

@@ -8,6 +8,7 @@ corre sin Docker (`make test-unit`).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -38,6 +39,48 @@ def make_settings(**overrides: Any) -> Settings:
 def settings(tmp_path: Any) -> Settings:
     """Settings del bot para tests (sombrea a propósito la fixture `settings` de pytest-django)."""
     return make_settings(data_dir=str(tmp_path))
+
+
+@dataclass
+class Tenant:
+    """La familia por defecto de los tests, creada por el fixture autouse de abajo.
+
+    Casi todos los tests necesitan un niño al que colgar los datos; tenerlo en un objeto de
+    módulo evita arrastrar un parámetro por las decenas de funciones auxiliares que ya
+    existen, sin renunciar a que el ámbito sea explícito en el código de producción.
+    """
+
+    family_id: int = 0
+    school_id: int = 0
+    child_id: int = 0
+    chat_id: int = -100999
+
+
+TENANT = Tenant()
+
+
+@pytest.fixture(autouse=True)
+async def _default_tenant(request: pytest.FixtureRequest) -> AsyncIterator[None]:
+    """Crea familia, colegio y niño antes de cada test que toque la DB."""
+    if request.node.get_closest_marker("django_db") is None:
+        yield
+        return
+    from app.db import repo
+
+    family = await repo.create_family("Familia de prueba")
+    school = await repo.create_school(family.pk, "Colegio de prueba")
+    child = await repo.create_child(family.pk, school.pk, "Niño de prueba", chat_id=TENANT.chat_id)
+    TENANT.family_id, TENANT.school_id, TENANT.child_id = family.pk, school.pk, child.pk
+    yield
+
+
+async def make_child(name: str, *, chat_id: int | None = None) -> Any:
+    """Un segundo niño (u otra familia) para los tests de aislamiento."""
+    from app.db import repo
+
+    family = await repo.create_family(f"Familia {name}")
+    school = await repo.create_school(family.pk, f"Colegio {name}")
+    return await repo.create_child(family.pk, school.pk, name, chat_id=chat_id)
 
 
 @pytest.fixture(autouse=True)

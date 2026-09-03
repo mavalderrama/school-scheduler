@@ -14,11 +14,21 @@ from app.db.models import LLMTask, NotificationKind, SourceKind, SourceStatus
 from app.llm.provider import LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ExtractedEntry, ExtractionResult, LLMUsage
 from app.scheduler.jobs import purge_photos_job
-from app.services import ingest, status
+from app.services import ingest, scope, status
+from app.services.scope import Scope
+from tests.conftest import TENANT
 from tests.test_ingest import STRONG, fake_download, providers
 from tests.test_provider import FakeProvider
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+async def a_scope() -> Scope:
+    """El ámbito de la familia por defecto de los tests."""
+    found = await scope.for_child(TENANT.child_id)
+    assert found is not None
+    return found
+
 
 CHAT = -100999
 
@@ -32,6 +42,7 @@ async def ingest_photo(settings: Settings, provider: FakeProvider) -> ingest.Ing
         download=fake_download,
         settings=settings,
         providers=providers(provider),
+        child_id=TENANT.child_id,
     )
 
 
@@ -55,7 +66,7 @@ async def test_quota_leaves_the_photo_retryable(settings: Settings) -> None:
     now = timezone.now() + timedelta(minutes=1)
     pending = await repo.photos_awaiting_extraction(now, give_up_before=now - timedelta(hours=24))
     assert [s.pk for s in pending] == [source.pk]
-    assert await repo.count_awaiting_extraction() == 1
+    assert await repo.count_awaiting_extraction(TENANT.family_id) == 1
 
 
 async def test_other_llm_errors_mark_the_photo_failed(settings: Settings) -> None:
@@ -63,7 +74,7 @@ async def test_other_llm_errors_mark_the_photo_failed(settings: Settings) -> Non
         await ingest_photo(settings, FakeProvider("a", fail=LLMUnavailableError("caído")))
     source = await repo.get_source(info.value.source_id)
     assert source is not None and source.status == SourceStatus.FAILED
-    assert await repo.count_awaiting_extraction() == 0
+    assert await repo.count_awaiting_extraction(TENANT.family_id) == 0
 
 
 async def test_a_photo_waiting_for_confirmation_is_not_retried(settings: Settings) -> None:
@@ -112,7 +123,7 @@ async def test_retry_after_quota_succeeds(settings: Settings) -> None:
     assert extraction == STRONG
     refreshed = await repo.get_source(source.pk)
     assert refreshed is not None and refreshed.raw_llm_output is not None
-    assert await repo.count_awaiting_extraction() == 0
+    assert await repo.count_awaiting_extraction(TENANT.family_id) == 0
 
 
 # --- Retención de fotos ----------------------------------------------------------------------
@@ -152,7 +163,14 @@ async def test_purge_ignores_photos_still_pending(settings: Settings) -> None:
 
 async def test_status_report_covers_the_operational_facts(settings: Settings) -> None:
     await ingest_photo(settings, FakeProvider("claude_sdk", result=STRONG))
-    await repo.log_notification(NotificationKind.DAILY, date(2026, 9, 3), CHAT, ok=True, error=None)
+    await repo.log_notification(
+        NotificationKind.DAILY,
+        date(2026, 9, 3),
+        CHAT,
+        ok=True,
+        error=None,
+        child_id=TENANT.child_id,
+    )
     await repo.log_llm_call(
         task=LLMTask.VISION,
         provider="claude_sdk",
@@ -160,9 +178,12 @@ async def test_status_report_covers_the_operational_facts(settings: Settings) ->
         error=None,
         usage=LLMUsage("claude_sdk", "sonnet", 100, 20, 0.01, 900, cache_read_tokens=50),
         duration_ms=900,
+        family_id=TENANT.family_id,
     )
 
-    report = await status.build_status(settings, providers(FakeProvider("claude_sdk")))
+    report = await status.build_status(
+        settings, providers(FakeProvider("claude_sdk")), scope=await a_scope()
+    )
     assert "Estado del bot" in report
     assert "claude_sdk" in report
     assert "Última notificación" in report
@@ -174,22 +195,30 @@ async def test_status_report_covers_the_operational_facts(settings: Settings) ->
 async def test_status_warns_about_an_expiring_token(settings: Settings) -> None:
     today = date.today()
     expiring = settings.model_copy(update={"claude_token_issued_at": today - timedelta(days=350)})
-    report = await status.build_status(expiring, providers(FakeProvider("claude_sdk")))
+    report = await status.build_status(
+        expiring, providers(FakeProvider("claude_sdk")), scope=await a_scope()
+    )
     assert "⚠️" in report and "caduca" in report
 
     fresh = settings.model_copy(update={"claude_token_issued_at": today})
-    assert "🔑 Token" in await status.build_status(fresh, providers(FakeProvider("claude_sdk")))
+    assert "🔑 Token" in await status.build_status(
+        fresh, providers(FakeProvider("claude_sdk")), scope=await a_scope()
+    )
 
 
 async def test_status_mentions_photos_waiting_for_quota(settings: Settings) -> None:
     with pytest.raises(ingest.IngestError):
         await ingest_photo(settings, FakeProvider("a", fail=LLMQuotaError("límite")))
-    report = await status.build_status(settings, providers(FakeProvider("a")))
+    report = await status.build_status(
+        settings, providers(FakeProvider("a")), scope=await a_scope()
+    )
     assert "esperando a que haya cuota" in report
 
 
 async def test_status_without_any_activity(settings: Settings) -> None:
-    report = await status.build_status(settings, providers(FakeProvider("a")))
+    report = await status.build_status(
+        settings, providers(FakeProvider("a")), scope=await a_scope()
+    )
     assert "Todavía no he enviado ninguna notificación" in report
     assert "(sin llamadas este mes)" in report
 
@@ -220,12 +249,14 @@ async def test_entries_survive_a_purged_photo(settings: Settings) -> None:
     await repo.update_source(result.source_id, created_at=timezone.now() - timedelta(days=200))
     await purge_photos_job(settings)
 
-    entries = await repo.active_entries(date(2026, 9, 3), date(2026, 9, 3))
+    entries = await repo.active_entries(TENANT.child_id, date(2026, 9, 3), date(2026, 9, 3))
     assert [e.text for e in entries] == ["sudadera"]
 
 
 async def test_source_kind_is_recorded_for_text_corrections() -> None:
-    source = await repo.create_source(SourceKind.TEXT_CORRECTION, chat_id=CHAT)
+    source = await repo.create_source(
+        SourceKind.TEXT_CORRECTION, chat_id=CHAT, child_id=TENANT.child_id
+    )
     assert source.chat_id == CHAT
     assert source.kind == SourceKind.TEXT_CORRECTION
 
@@ -236,5 +267,6 @@ async def test_the_token_warning_says_which_year(settings: Settings) -> None:
     report = await status.build_status(
         settings.model_copy(update={"claude_token_issued_at": issued}),
         providers(FakeProvider("claude_sdk")),
+        scope=await a_scope(),
     )
     assert "de 2027" in report

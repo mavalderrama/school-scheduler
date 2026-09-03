@@ -173,6 +173,7 @@ async def ingest_photo(
     user_id: int,
     display_name: str,
     chat_id: int,
+    child_id: int,
     download: Downloader,
     settings: Settings,
     providers: LLMProviders,
@@ -182,6 +183,7 @@ async def ingest_photo(
     user = await repo.upsert_user(user_id, display_name)
     source = await repo.create_source(
         SourceKind.PHOTO,
+        child_id=child_id,
         telegram_file_id=file_id,
         submitted_by=user,
         chat_id=chat_id,

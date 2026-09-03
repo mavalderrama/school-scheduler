@@ -21,6 +21,7 @@ from app.llm.schemas import ChatTurn, Intent
 from app.log import get_logger
 from app.services import cache
 from app.services import schedule as schedule_service
+from app.services.scope import Scope
 
 log = get_logger(__name__)
 
@@ -203,16 +204,16 @@ async def classify(
 # --- Despacho ------------------------------------------------------------------------------
 
 
-async def query_range(intent: Intent, today: date, *, country: str = "CO") -> ChatReply:
+async def query_range(scope: Scope, intent: Intent, today: date) -> ChatReply:
     date_from = intent.date_from or today
     date_to = intent.date_to or date_from
     if date_to < date_from:
         date_from, date_to = date_to, date_from
-    entries = await repo.active_entries(date_from, date_to)
+    entries = await repo.active_entries(scope.child_id, date_from, date_to)
     if date_from == date_to:
         title = f"📚 <b>{compose.format_date_es(date_from)}</b>:"
         # Un solo día lleva también la clase del horario, que es lo que más se pregunta.
-        slots = await schedule_service.resolve_day(date_from, country=country)
+        slots = await schedule_service.resolve_day(scope, date_from)
         lines = [title, *compose.slot_lines(slots)]
         lines.extend(compose.stored_line(e) for e in entries)
         if len(lines) == 1:
@@ -248,13 +249,15 @@ async def prepare_add(intent: Intent, today: date, chat_id: int) -> ChatReply:
     return ChatReply(text=compose.format_add_question(intent.date_from, kind, text), edit=edit)
 
 
-async def prepare_remove(intent: Intent, today: date, chat_id: int) -> ChatReply:
+async def prepare_remove(scope: Scope, intent: Intent, today: date, chat_id: int) -> ChatReply:
     date_from = intent.date_from or today
     date_to = intent.date_to or date_from
-    candidates = await repo.find_active_entries(date_from, date_to, intent.target_entry_hint)
+    candidates = await repo.find_active_entries(
+        scope.child_id, date_from, date_to, intent.target_entry_hint
+    )
     if not candidates and intent.target_entry_hint:
         # La pista no casó con nada: reintenta sin filtrar por texto.
-        candidates = await repo.find_active_entries(date_from, date_to)
+        candidates = await repo.find_active_entries(scope.child_id, date_from, date_to)
 
     if not candidates:
         return ChatReply(
@@ -287,30 +290,28 @@ async def prepare_remove(intent: Intent, today: date, chat_id: int) -> ChatReply
     )
 
 
-async def query_subject(intent: Intent, today: date, *, country: str = "CO") -> ChatReply:
+async def query_subject(scope: Scope, intent: Intent, today: date) -> ChatReply:
     """«¿cuándo hay natación?»: se calcula con el horario, sin tocar el LLM otra vez."""
     subject = (intent.subject or intent.text or "").strip()
     if not subject:
         return ChatReply(text="¿De qué materia? Por ejemplo: «¿cuándo hay natación?».")
-    found = await schedule_service.find_subject(subject, today, country=country, count=3)
-    if not found and not await repo.active_schedules(today):
+    found = await schedule_service.find_subject(scope, subject, today, count=3)
+    if not found and not await repo.active_schedules(scope.child_id, today):
         return ChatReply(text=compose.NO_SCHEDULE_TEXT)
     return ChatReply(text=compose.format_next_occurrences(subject, found))
 
 
-async def dispatch(
-    intent: Intent, *, today: date, chat_id: int, country: str = "CO", store: object = None
-) -> ChatReply:
+async def dispatch(scope: Scope, intent: Intent, *, today: date, chat_id: int) -> ChatReply:
     """Intención ya clasificada → respuesta. `confirm`/`reject`/`correct_pending` los
     resuelve el handler porque necesitan el estado pendiente y los proveedores."""
     if intent.action == "query_range":
-        return await query_range(intent, today, country=country)
+        return await query_range(scope, intent, today)
     if intent.action == "query_subject":
-        return await query_subject(intent, today, country=country)
+        return await query_subject(scope, intent, today)
     if intent.action == "add_entry":
         return await prepare_add(intent, today, chat_id)
     if intent.action == "remove_entry":
-        return await prepare_remove(intent, today, chat_id)
+        return await prepare_remove(scope, intent, today, chat_id)
     if intent.action == "help":
         return ChatReply(text=compose.HELP_TEXT)
     return ChatReply(

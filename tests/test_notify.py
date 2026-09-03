@@ -10,9 +10,19 @@ from app.config import Settings
 from app.db import repo
 from app.db.models import NotificationKind, SourceKind
 from app.llm.schemas import ExtractedEntry, ExtractionResult
-from app.services import agenda, notify
+from app.services import agenda, notify, scope
+from app.services.scope import Scope
+from tests.conftest import TENANT
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+async def a_scope() -> Scope:
+    """El ámbito de la familia por defecto de los tests."""
+    found = await scope.for_child(TENANT.child_id)
+    assert found is not None
+    return found
+
 
 MON, TUE, WED = date(2026, 9, 7), date(2026, 9, 8), date(2026, 9, 9)  # lunes, martes, miércoles
 FRI, SAT, SUN = date(2026, 9, 11), date(2026, 9, 12), date(2026, 9, 13)
@@ -30,7 +40,7 @@ class FakeSender:
 
 
 async def seed(*entries: tuple[date, str, str]) -> None:
-    source = await repo.create_source(SourceKind.MANUAL)
+    source = await repo.create_source(SourceKind.MANUAL, child_id=TENANT.child_id)
     await agenda.apply_source(
         source.pk,
         ExtractionResult(
@@ -89,7 +99,7 @@ async def test_daily_message_format_groups_by_kind(settings: Settings) -> None:
         (TUE, "event", "salida al parque"),
         (WED, "note", "no debe salir"),
     )
-    kind, text = await notify.build_daily_message(TUE)
+    kind, text = await notify.build_daily_message(await a_scope(), TUE)
     assert kind == NotificationKind.DAILY
     assert text == (
         "📚 Mañana, martes 8 de septiembre\n"
@@ -99,60 +109,61 @@ async def test_daily_message_format_groups_by_kind(settings: Settings) -> None:
     )
 
 
-async def test_send_daily_is_idempotent_per_chat(settings: Settings) -> None:
-    settings = settings.model_copy(update={"notify_chat_ids": [-100, -200]})
+async def test_send_daily_is_idempotent_per_child(settings: Settings) -> None:
+    """El aviso va al chat del niño, y no se repite para la misma fecha.
+
+    Antes se recorría una lista global de chats; ahora el destinatario sale del niño, así
+    que la idempotencia se comprueba por (tipo, fecha, chat, niño).
+    """
     await seed((TUE, "bring", "sudadera"))
     sender = FakeSender()
-    first = await notify.send_daily(sender, settings, MON)
-    assert [(o.chat_id, o.sent, o.skipped) for o in first] == [
-        (-100, True, False),
-        (-200, True, False),
-    ]
-    assert [c for c, _ in sender.sent] == [-100, -200]
+    first = await notify.send_daily(sender, settings, MON, scope=await a_scope())
+    assert [(o.chat_id, o.sent, o.skipped) for o in first] == [(TENANT.chat_id, True, False)]
+    assert [c for c, _ in sender.sent] == [TENANT.chat_id]
 
-    second = await notify.send_daily(sender, settings, MON)
+    second = await notify.send_daily(sender, settings, MON, scope=await a_scope())
     assert all(o.skipped for o in second)
-    assert len(sender.sent) == 2  # no reenvía
+    assert len(sender.sent) == 1  # no reenvía
+
     rows = await repo.notifications(NotificationKind.DAILY)
-    assert [(r.chat_id, r.ok, r.target_date) for r in rows] == [
-        (-100, True, TUE),
-        (-200, True, TUE),
-    ]
+    assert [(r.chat_id, r.ok, r.target_date) for r in rows] == [(TENANT.chat_id, True, TUE)]
 
 
 async def test_send_daily_nudges_when_empty(settings: Settings) -> None:
     sender = FakeSender()
-    outcomes = await notify.send_daily(sender, settings, MON)
+    outcomes = await notify.send_daily(sender, settings, MON, scope=await a_scope())
     assert [o.kind for o in outcomes] == [NotificationKind.NUDGE_EMPTY]
     assert sender.sent == [(-100999, notify.format_nudge(TUE))]
     # Y no se vuelve a mandar aunque la agenda siga vacía.
-    assert all(o.skipped for o in await notify.send_daily(sender, settings, MON))
+    assert all(
+        o.skipped for o in await notify.send_daily(sender, settings, MON, scope=await a_scope())
+    )
 
 
 async def test_nudge_then_photo_does_not_resend_that_day(settings: Settings) -> None:
     sender = FakeSender()
-    await notify.send_daily(sender, settings, MON)
+    await notify.send_daily(sender, settings, MON, scope=await a_scope())
     await seed((TUE, "bring", "sudadera"))
-    outcomes = await notify.send_daily(sender, settings, MON)
+    outcomes = await notify.send_daily(sender, settings, MON, scope=await a_scope())
     assert outcomes[0].skipped and len(sender.sent) == 1
 
 
 async def test_send_daily_skips_weekend(settings: Settings) -> None:
     sender = FakeSender()
-    assert await notify.send_daily(sender, settings, FRI) == []
+    assert await notify.send_daily(sender, settings, FRI, scope=await a_scope()) == []
     assert sender.sent == []
 
 
 async def test_failed_send_is_logged_and_retried_next_run(settings: Settings) -> None:
     await seed((TUE, "bring", "sudadera"))
     failing = FakeSender(fail_for={-100999})
-    outcomes = await notify.send_daily(failing, settings, MON)
+    outcomes = await notify.send_daily(failing, settings, MON, scope=await a_scope())
     assert outcomes[0].sent is False and "telegram caído" in (outcomes[0].error or "")
     rows = await repo.notifications()
     assert [(r.ok, r.error is not None) for r in rows] == [(False, True)]
 
     working = FakeSender()
-    again = await notify.send_daily(working, settings, MON)
+    again = await notify.send_daily(working, settings, MON, scope=await a_scope())
     assert again[0].sent is True and not again[0].skipped
     assert [r.ok for r in await repo.notifications()] == [False, True]
 
@@ -161,18 +172,20 @@ async def test_gap_check_reports_uncovered_weekdays(settings: Settings) -> None:
     next_mon, next_tue = date(2026, 9, 14), date(2026, 9, 15)
     await seed((next_mon, "bring", "x"), (next_tue, "note", "y"))
     sender = FakeSender()
-    outcomes = await notify.send_gap_check(sender, settings, SUN)
+    outcomes = await notify.send_gap_check(sender, settings, SUN, scope=await a_scope())
     assert [o.kind for o in outcomes] == [NotificationKind.GAP_CHECK]
     assert sender.sent[0][1] == notify.format_gaps(
         [date(2026, 9, 16), date(2026, 9, 17), date(2026, 9, 18)]
     )
-    assert all(o.skipped for o in await notify.send_gap_check(sender, settings, SUN))
+    assert all(
+        o.skipped for o in await notify.send_gap_check(sender, settings, SUN, scope=await a_scope())
+    )
 
 
 async def test_gap_check_silent_when_week_is_covered(settings: Settings) -> None:
     await seed(*((date(2026, 9, 14 + i), "note", "x") for i in range(5)))
     sender = FakeSender()
-    assert await notify.send_gap_check(sender, settings, SUN) == []
+    assert await notify.send_gap_check(sender, settings, SUN, scope=await a_scope()) == []
     assert sender.sent == []
 
 
@@ -183,7 +196,7 @@ async def seed_schedule(anchor: date = date(2026, 8, 31)) -> None:
     """El horario K4A, reducido a las franjas que usan estos tests."""
     from app.llm.schemas import ScheduleDraft, SlotDraft
 
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100999)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100999, child_id=TENANT.child_id)
     await agenda.apply_source(
         source.pk,
         ExtractionResult(
@@ -213,7 +226,9 @@ async def test_a_class_replaces_the_empty_nudge(settings: Settings) -> None:
     """Antes, sin entradas, solo salía «mándame foto». Ahora se avisa de la clase."""
     await seed_schedule()
     send = FakeSender()
-    outcomes = await notify.send_daily(send, settings, MON)  # mañana es martes 8, Semana B
+    outcomes = await notify.send_daily(
+        send, settings, MON, scope=await a_scope()
+    )  # mañana es martes 8, Semana B
 
     assert [o.kind for o in outcomes] == [NotificationKind.DAILY]
     text = send.sent[0][1]
@@ -225,7 +240,7 @@ async def test_the_class_comes_before_the_agenda_entries(settings: Settings) -> 
     await seed_schedule()
     await seed((TUE, "bring", "sudadera"))
     send = FakeSender()
-    await notify.send_daily(send, settings, MON)
+    await notify.send_daily(send, settings, MON, scope=await a_scope())
 
     text = send.sent[0][1]
     assert text.index("Motricidad") < text.index("sudadera")
@@ -234,7 +249,7 @@ async def test_the_class_comes_before_the_agenda_entries(settings: Settings) -> 
 async def test_without_a_schedule_the_nudge_still_works(settings: Settings) -> None:
     """Sin horario cargado no se inventa nada: sigue el aviso de agenda vacía."""
     send = FakeSender()
-    outcomes = await notify.send_daily(send, settings, MON)
+    outcomes = await notify.send_daily(send, settings, MON, scope=await a_scope())
     assert [o.kind for o in outcomes] == [NotificationKind.NUDGE_EMPTY]
     assert "¿Me mandan foto?" in send.sent[0][1]
 
@@ -243,7 +258,7 @@ async def test_the_schedule_can_be_turned_off(settings: Settings) -> None:
     await seed_schedule()
     off = settings.model_copy(update={"schedule_enabled": False})
     send = FakeSender()
-    outcomes = await notify.send_daily(send, off, MON)
+    outcomes = await notify.send_daily(send, off, MON, scope=await a_scope())
     assert [o.kind for o in outcomes] == [NotificationKind.NUDGE_EMPTY]
 
 
@@ -251,7 +266,7 @@ async def seed_pac(anchor: date = date(2026, 8, 31)) -> None:
     """El PAC: ciclo de 1 semana, natación martes y jueves."""
     from app.llm.schemas import ScheduleDraft, SlotDraft
 
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100999)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100999, child_id=TENANT.child_id)
     await agenda.apply_source(
         source.pk,
         ExtractionResult(
@@ -277,7 +292,7 @@ async def test_the_daily_message_lists_every_active_schedule(settings: Settings)
     await seed_schedule()
     await seed_pac()
     send = FakeSender()
-    await notify.send_daily(send, settings, MON)  # mañana es martes 8
+    await notify.send_daily(send, settings, MON, scope=await a_scope())  # mañana es martes 8
 
     text = send.sent[0][1]
     assert "Motricidad" in text
@@ -290,7 +305,7 @@ async def test_with_one_schedule_the_name_is_not_repeated(settings: Settings) ->
     """Con un solo horario el nombre en cada línea es ruido."""
     await seed_schedule()
     send = FakeSender()
-    await notify.send_daily(send, settings, MON)
+    await notify.send_daily(send, settings, MON, scope=await a_scope())
     assert "Horario K4A" not in send.sent[0][1]
 
 
@@ -308,7 +323,7 @@ async def test_the_eve_of_a_holiday_is_silent(settings: Settings) -> None:
     """Domingo por la noche, con el lunes festivo: no se manda nada."""
     await seed_schedule()
     send = FakeSender()
-    outcomes = await notify.send_daily(send, settings, SUNDAY_BEFORE)
+    outcomes = await notify.send_daily(send, settings, SUNDAY_BEFORE, scope=await a_scope())
     assert outcomes == []
     assert send.sent == []
 
@@ -317,7 +332,7 @@ async def test_on_the_holiday_it_announces_the_next_school_day(settings: Setting
     """El lunes festivo por la noche sí se avisa, y del **martes**."""
     await seed_schedule()
     send = FakeSender()
-    outcomes = await notify.send_daily(send, settings, RAZA)
+    outcomes = await notify.send_daily(send, settings, RAZA, scope=await a_scope())
 
     assert [o.kind for o in outcomes] == [NotificationKind.DAILY]
     assert "martes 13 de octubre" in send.sent[0][1]
@@ -330,12 +345,14 @@ async def test_a_recess_week_stays_quiet(settings: Settings) -> None:
     await seed_schedule()
     week = [date(2026, 10, 19) + timedelta(days=i) for i in range(5)]
     for day in week:
-        await repo.add_calendar_exception(day, CalendarKind.SCHOOL_CLOSED, "Semana de receso")
+        await repo.add_calendar_exception(
+            TENANT.school_id, day, CalendarKind.SCHOOL_CLOSED, "Semana de receso"
+        )
 
     send = FakeSender()
     # Las tardes del domingo al jueves: todas apuntan a un día sin colegio.
     for evening in [date(2026, 10, 18), *week[:-1]]:
-        assert await notify.send_daily(send, settings, evening) == []
+        assert await notify.send_daily(send, settings, evening, scope=await a_scope()) == []
     assert send.sent == []
 
 
@@ -343,7 +360,7 @@ async def test_a_normal_weekday_is_unchanged(settings: Settings) -> None:
     """Regresión: un lunes cualquiera sigue avisando del martes, como siempre."""
     await seed_schedule()
     send = FakeSender()
-    outcomes = await notify.send_daily(send, settings, MON)
+    outcomes = await notify.send_daily(send, settings, MON, scope=await a_scope())
     assert [o.kind for o in outcomes] == [NotificationKind.DAILY]
     assert "martes 8 de septiembre" in send.sent[0][1]
 
@@ -352,7 +369,7 @@ async def test_gap_check_ignores_holidays(settings: Settings) -> None:
     """Un lunes festivo de la semana que viene no es un hueco que reclamar."""
     send = FakeSender()
     # Domingo 4 de octubre: la semana siguiente empieza el lunes 12, que es festivo.
-    await notify.send_gap_check(send, settings, date(2026, 10, 11))
+    await notify.send_gap_check(send, settings, date(2026, 10, 11), scope=await a_scope())
     assert send.sent, "debería reclamar los días lectivos que sí faltan"
     text = send.sent[0][1]
     assert "lunes 12" not in text
@@ -364,8 +381,13 @@ async def test_gap_check_says_nothing_when_the_whole_week_is_off(settings: Setti
 
     for i in range(5):
         await repo.add_calendar_exception(
-            date(2026, 10, 19) + timedelta(days=i), CalendarKind.SCHOOL_CLOSED, "Receso"
+            TENANT.school_id,
+            date(2026, 10, 19) + timedelta(days=i),
+            CalendarKind.SCHOOL_CLOSED,
+            "Receso",
         )
     send = FakeSender()
-    assert await notify.send_gap_check(send, settings, date(2026, 10, 18)) == []
+    assert (
+        await notify.send_gap_check(send, settings, date(2026, 10, 18), scope=await a_scope()) == []
+    )
     assert send.sent == []

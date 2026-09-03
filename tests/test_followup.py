@@ -16,11 +16,21 @@ from app.db.models import ScheduleTemplate, SourceKind, SourceStatus
 from app.llm import compose
 from app.llm.provider import LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ExtractionResult, QAPair, ScheduleDraft, SlotDraft
-from app.services import agenda, chat, ingest, schedule
+from app.services import agenda, chat, ingest, schedule, scope
+from app.services.scope import Scope
+from tests.conftest import TENANT
 from tests.test_ingest import providers
 from tests.test_provider import FakeProvider
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+async def a_scope() -> Scope:
+    """El ámbito de la familia por defecto de los tests."""
+    found = await scope.for_child(TENANT.child_id)
+    assert found is not None
+    return found
+
 
 ANCHOR = date(2026, 8, 31)
 K4A = [
@@ -114,7 +124,7 @@ def test_a_complete_schedule_is_never_interrogated() -> None:
 
 async def test_the_answer_completes_the_extraction(settings: Settings) -> None:
     """Refinar devuelve la extracción con el ancla puesta y ya no falta nada."""
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     provider = FakeProvider("claude_sdk")
     provider.refined = extraction(anchor=ANCHOR)
 
@@ -136,7 +146,7 @@ async def test_the_answer_completes_the_extraction(settings: Settings) -> None:
 
 
 async def test_refining_twice_the_same_thing_uses_the_cache(settings: Settings) -> None:
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     provider = FakeProvider("claude_sdk")
     provider.refined = extraction(anchor=ANCHOR)
     pairs = [QAPair(question="¿Qué lunes?", answer="el 31 de agosto")]
@@ -149,7 +159,7 @@ async def test_refining_twice_the_same_thing_uses_the_cache(settings: Settings) 
 
 
 async def test_a_failed_refine_is_logged_and_raises(settings: Settings) -> None:
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     provider = FakeProvider("a", fail=LLMUnavailableError("caído"))
     with pytest.raises(LLMUnavailableError):
         await ingest.refine_extraction(
@@ -166,7 +176,7 @@ async def test_a_failed_refine_is_logged_and_raises(settings: Settings) -> None:
 
 
 async def test_applying_a_schedule_stores_the_slots_and_confirms_the_source() -> None:
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     result = await agenda.apply_source(source.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
 
     assert result.schedule_id is not None
@@ -176,7 +186,7 @@ async def test_applying_a_schedule_stores_the_slots_and_confirms_the_source() ->
     refreshed = await repo.get_source(source.pk)
     assert refreshed is not None and refreshed.status == SourceStatus.CONFIRMED
 
-    template = await repo.active_schedule(date(2026, 9, 2))
+    template = await repo.active_schedule(TENANT.child_id, date(2026, 9, 2))
     assert template is not None
     assert (template.name, template.cycle_weeks, template.anchor_monday) == (
         "Horario K4A",
@@ -192,7 +202,7 @@ async def test_applying_a_schedule_stores_the_slots_and_confirms_the_source() ->
 
 async def test_applying_a_schedule_without_an_anchor_refuses() -> None:
     """Defensa en profundidad: aunque el interrogatorio falle, la DB no acepta esto."""
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     with pytest.raises(ValueError, match="ancla"):
         await agenda.apply_source(source.pk, extraction(), today=date(2026, 9, 2))
 
@@ -203,27 +213,27 @@ async def test_two_schedules_coexist_by_default() -> None:
     La rotación académica y el programa de la jornada extendida son cosas distintas y el
     mismo día tiene las dos, así que por defecto se añade, no se reemplaza.
     """
-    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(first.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
 
-    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     pac = extraction(anchor=ANCHOR)
     assert pac.schedule is not None
     pac.schedule.name = "PAC - jornada extendida"
     await agenda.apply_source(second.pk, pac, today=date(2026, 10, 5))
 
-    active = await repo.active_schedules(date(2026, 10, 5))
+    active = await repo.active_schedules(TENANT.child_id, date(2026, 10, 5))
     assert len(active) == 2
     assert {t.name for t in active} == {"Horario K4A", "PAC - jornada extendida"}
 
 
 async def test_replacing_is_explicit_and_supersedes_without_deleting() -> None:
-    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(first.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
-    old = await repo.active_schedule(date(2026, 9, 2))
+    old = await repo.active_schedule(TENANT.child_id, date(2026, 9, 2))
     assert old is not None
 
-    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(
         second.pk, extraction(anchor=ANCHOR), today=date(2026, 10, 5), replace_ids=[old.pk]
     )
@@ -234,17 +244,19 @@ async def test_replacing_is_explicit_and_supersedes_without_deleting() -> None:
     assert templates[0].superseded_by_id == second.pk
     assert templates[0].valid_to == date(2026, 10, 4)  # se cierra el día antes
     assert templates[1].is_active is True
-    assert [t.pk for t in await repo.active_schedules(date(2026, 10, 5))] == [templates[1].pk]
+    assert [t.pk for t in await repo.active_schedules(TENANT.child_id, date(2026, 10, 5))] == [
+        templates[1].pk
+    ]
 
 
 async def test_replacing_the_same_day_never_closes_before_it_opened() -> None:
     """Regresión: reemplazar el mismo día dejaba `valid_to` anterior a `valid_from`."""
-    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    first = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(first.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
-    old = await repo.active_schedule(date(2026, 9, 2))
+    old = await repo.active_schedule(TENANT.child_id, date(2026, 9, 2))
     assert old is not None
 
-    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    second = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(
         second.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2), replace_ids=[old.pk]
     )
@@ -255,7 +267,7 @@ async def test_replacing_the_same_day_never_closes_before_it_opened() -> None:
 
 async def test_duplicate_rows_in_the_photo_do_not_break_the_unique() -> None:
     """El modelo puede repetir una fila de la tabla; se queda la primera."""
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     noisy = extraction(anchor=ANCHOR)
     assert noisy.schedule is not None
     noisy.schedule.slots.append(
@@ -263,7 +275,7 @@ async def test_duplicate_rows_in_the_photo_do_not_break_the_unique() -> None:
     )
     result = await agenda.apply_source(source.pk, noisy, today=date(2026, 9, 2))
     assert result.slots == 10
-    template = await repo.active_schedule(date(2026, 9, 2))
+    template = await repo.active_schedule(TENANT.child_id, date(2026, 9, 2))
     assert template is not None
     slots = await repo.schedule_slots(template.pk)
     assert [s.subject for s in slots if s.week_index == 0 and s.weekday == 1] == ["Artes plásticas"]
@@ -274,12 +286,12 @@ async def test_duplicate_rows_in_the_photo_do_not_break_the_unique() -> None:
 
 async def test_the_stored_schedule_answers_what_is_tomorrow() -> None:
     """Lo que el usuario pidió: guardar la tabla y que el bot sepa qué toca."""
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(source.pk, extraction(anchor=ANCHOR), today=date(2026, 9, 2))
 
-    wednesday = await schedule.resolve(date(2026, 9, 2))
-    thursday = await schedule.resolve(date(2026, 9, 3))
-    natacion = await schedule.find_subject("natacion", date(2026, 9, 2), count=1)
+    wednesday = await schedule.resolve(await a_scope(), date(2026, 9, 2))
+    thursday = await schedule.resolve(await a_scope(), date(2026, 9, 3))
+    natacion = await schedule.find_subject(await a_scope(), "natacion", date(2026, 9, 2), count=1)
 
     assert wednesday is not None and wednesday.subject == "Deporte 1"
     assert thursday is not None and thursday.subject == "Música"
@@ -287,8 +299,8 @@ async def test_the_stored_schedule_answers_what_is_tomorrow() -> None:
 
 
 async def test_without_a_schedule_resolve_says_nothing_rather_than_guessing() -> None:
-    assert await schedule.resolve(date(2026, 9, 2)) is None
-    assert await schedule.find_subject("natación", date(2026, 9, 2)) == []
+    assert await schedule.resolve(await a_scope(), date(2026, 9, 2)) is None
+    assert await schedule.find_subject(await a_scope(), "natación", date(2026, 9, 2)) == []
 
 
 # --- Convivencia de horarios y pie de foto ---------------------------------------------------
@@ -318,46 +330,46 @@ def pac_draft() -> ExtractionResult:
 async def test_a_day_shows_every_active_schedule() -> None:
     """El caso que falló: con la rotación y el PAC cargados, el jueves tiene las dos."""
     for ext in (extraction(anchor=ANCHOR), pac_draft()):
-        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
         await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
 
-    slots = await schedule.resolve_day(date(2026, 9, 3))  # jueves, Semana A
+    slots = await schedule.resolve_day(await a_scope(), date(2026, 9, 3))  # jueves, Semana A
     assert {s.subject for s in slots} == {"Música", "Jornada extendida de natación"}
     assert {s.schedule_name for s in slots} == {"Horario K4A", "PAC - jornada extendida"}
 
 
 async def test_a_one_week_cycle_never_alternates() -> None:
     """El PAC se repite igual todas las semanas: cycle_weeks=1."""
-    src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    src = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(src.pk, pac_draft(), today=date(2026, 9, 2))
     for day in (date(2026, 9, 3), date(2026, 9, 10), date(2026, 9, 17)):
-        slots = await schedule.resolve_day(day)
+        slots = await schedule.resolve_day(await a_scope(), day)
         assert [s.subject for s in slots] == ["Jornada extendida de natación"]
 
 
 async def test_a_day_the_pac_does_not_cover_only_shows_the_other() -> None:
     """El PAC no tiene viernes: ese día solo aparece la rotación académica."""
     for ext in (extraction(anchor=ANCHOR), pac_draft()):
-        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
         await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
-    slots = await schedule.resolve_day(date(2026, 9, 4))  # viernes, Semana A
+    slots = await schedule.resolve_day(await a_scope(), date(2026, 9, 4))  # viernes, Semana A
     assert [s.subject for s in slots] == ["Deporte 3"]
 
 
 async def test_a_holiday_is_reported_once_not_once_per_schedule() -> None:
     for ext in (extraction(anchor=ANCHOR), pac_draft()):
-        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
         await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
-    slots = await schedule.resolve_day(date(2026, 10, 12))  # Día de la Raza
+    slots = await schedule.resolve_day(await a_scope(), date(2026, 10, 12))  # Día de la Raza
     assert len(slots) == 1
     assert slots[0].subject is None and slots[0].skipped_reason == "Día de la Raza"
 
 
 async def test_find_subject_looks_in_every_schedule() -> None:
     for ext in (extraction(anchor=ANCHOR), pac_draft()):
-        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+        src = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
         await agenda.apply_source(src.pk, ext, today=date(2026, 9, 2))
-    found = await schedule.find_subject("natación", date(2026, 9, 2), count=3)
+    found = await schedule.find_subject(await a_scope(), "natación", date(2026, 9, 2), count=3)
     # El PAC tiene natación los martes y jueves; la rotación, los jueves de Semana B.
     assert [s.day for s in found] == [date(2026, 9, 3), date(2026, 9, 8), date(2026, 9, 10)]
 
@@ -376,6 +388,7 @@ async def test_the_photo_caption_reaches_the_model(settings: Settings) -> None:
         settings=settings,
         providers=providers(provider),
         note="Debes marcar este como PAC horario extendido",
+        child_id=TENANT.child_id,
     )
     assert provider.notes == ["Debes marcar este como PAC horario extendido"]
 
@@ -395,6 +408,7 @@ async def test_the_caption_is_part_of_the_cache_key(settings: Settings) -> None:
             settings=settings,
             providers=providers(provider),
             note=note,
+            child_id=TENANT.child_id,
         )
     assert provider.calls == 2  # la segunda repetición sí sale de la caché
 
@@ -414,6 +428,7 @@ async def test_the_caption_survives_a_restart(settings: Settings) -> None:
             settings=settings,
             providers=providers(provider),
             note="Debes marcar este como PAC horario extendido",
+            child_id=TENANT.child_id,
         )
     source = await repo.get_source(info.value.source_id)
     assert source is not None
@@ -447,14 +462,14 @@ def test_these_are_answers_not_a_cancellation(text: str) -> None:
 
 async def test_cancelling_discards_without_saving_anything(settings: Settings) -> None:
     """Lo que falló de verdad: escribir «descarta» se tomaba como respuesta a la pregunta."""
-    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    source = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     assert chat.is_cancel("Descarta")
 
     # El descarte lo ejecuta el nodo del grafo; aquí se comprueba el efecto en la DB.
     await agenda.reject_source(source.pk)
     refreshed = await repo.get_source(source.pk)
     assert refreshed is not None and refreshed.status == SourceStatus.REJECTED
-    assert await repo.active_schedules() == []
+    assert await repo.active_schedules(TENANT.child_id) == []
 
 
 def test_a_failed_refine_puts_the_question_back() -> None:
@@ -538,9 +553,9 @@ def test_a_rotating_schedule_keeps_its_week_labels() -> None:
 
 async def test_a_weekly_schedule_shows_no_week_label_in_the_day_line() -> None:
     """La línea del día tampoco debe decir «Semana A» si no hay alternancia."""
-    src = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
+    src = await repo.create_source(SourceKind.PHOTO, chat_id=-100, child_id=TENANT.child_id)
     await agenda.apply_source(src.pk, pac_draft(), today=date(2026, 9, 2))
-    slots = await schedule.resolve_day(date(2026, 9, 3))
+    slots = await schedule.resolve_day(await a_scope(), date(2026, 9, 3))
     assert [s.subject for s in slots] == ["Jornada extendida de natación"]
     assert slots[0].week_label is None
     assert "Semana" not in compose.slot_lines(slots)[0]

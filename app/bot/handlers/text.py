@@ -24,7 +24,7 @@ from app.graph.state import GraphState
 from app.llm import compose
 from app.llm.provider import LLMError, LLMProviders
 from app.log import get_logger
-from app.services import chat
+from app.services import chat, scope
 
 log = get_logger(__name__)
 router = Router(name="text")
@@ -47,6 +47,10 @@ async def on_text(
     chat_id = message.chat.id
     text = (message.text or "").strip()
     if not text:
+        return
+    sc = await scope.for_chat(chat_id)
+    if sc is None:
+        await message.answer(compose.NOT_LINKED_TEXT)
         return
     user_id = message.from_user.id if message.from_user else None
 
@@ -78,14 +82,8 @@ async def on_text(
         await _reply(message, chat_id, compose.NO_LLM_TEXT)
         return
 
-    today = datetime.now(settings.zoneinfo).date()
-    reply = await chat.dispatch(
-        intent,
-        today=today,
-        store=None,
-        chat_id=chat_id,
-        country=settings.school_country,
-    )
+    today = datetime.now(sc.zoneinfo).date()
+    reply = await chat.dispatch(sc, intent, today=today, chat_id=chat_id)
     await repo.save_message(chat_id, None, "assistant", reply.text)
 
     if reply.edit is None:
@@ -95,6 +93,7 @@ async def on_text(
     # Un alta o una baja abre su propio flujo en el grafo, así que también sobrevive.
     state: GraphState = {
         "chat_id": chat_id,
+        "child_id": sc.child_id,
         "flow": "edit",
         "edit": reply.edit,
         "user_id": user_id,

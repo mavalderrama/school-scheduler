@@ -38,6 +38,7 @@ async def resume_photo(bot: Bot, source: Source, runner: GraphRunner) -> bool:
 
     state: GraphState = {
         "chat_id": source.chat_id,
+        "child_id": source.child_id,
         "flow": "photo",
         "source_id": source.pk,
         "photo": {"local_path": source.local_path, "caption": source.caption},

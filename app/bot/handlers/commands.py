@@ -14,17 +14,26 @@ from app.db import repo
 from app.graph.runner import GraphRunner
 from app.llm import compose
 from app.llm.provider import LLMProviders
-from app.services import chat, notify, schoolcal, status
+from app.services import chat, notify, schoolcal, scope, status
 from app.services import schedule as schedule_service
+from app.services.scope import Scope
 
 router = Router(name="commands")
 
 
-async def _slots(day: date, settings: Settings) -> list[schedule_service.SlotResult]:
+async def _scope(message: Message) -> Scope | None:
+    """El niño de este chat. Si el chat no está vinculado, se dice y no se hace nada más."""
+    found = await scope.for_chat(message.chat.id)
+    if found is None:
+        await message.answer(compose.NOT_LINKED_TEXT)
+    return found
+
+
+async def _slots(sc: Scope, day: date, settings: Settings) -> list[schedule_service.SlotResult]:
     """Las clases del día, una por horario vigente. Vacío si no hay horarios o está apagado."""
     if not settings.schedule_enabled:
         return []
-    return await schedule_service.resolve_day(day, country=settings.school_country)
+    return await schedule_service.resolve_day(sc, day)
 
 
 @router.message(CommandStart())
@@ -44,10 +53,13 @@ async def cmd_ping(message: Message) -> None:
 
 @router.message(Command("hoy"))
 async def cmd_hoy(message: Message, settings: Settings) -> None:
-    today = datetime.now(settings.zoneinfo).date()
-    entries = await repo.active_entries(today, today)
+    sc = await _scope(message)
+    if sc is None:
+        return
+    today = datetime.now(sc.zoneinfo).date()
+    entries = await repo.active_entries(sc.child_id, today, today)
     lines = [f"📚 Hoy, {compose.format_date_es(today)}:"]
-    lines.extend(compose.slot_lines(await _slots(today, settings)))
+    lines.extend(compose.slot_lines(await _slots(sc, today, settings)))
     lines.extend(compose.stored_line(e) for e in entries)
     if len(lines) == 1:
         lines.append("No tengo nada apuntado.")
@@ -57,15 +69,16 @@ async def cmd_hoy(message: Message, settings: Settings) -> None:
 @router.message(Command("manana"))
 async def cmd_manana(message: Message, settings: Settings) -> None:
     """Lo de mañana, con el mismo formato que la notificación de las 19:00 (sin registrarla)."""
-    tomorrow = datetime.now(settings.zoneinfo).date() + timedelta(days=1)
-    exceptions = await repo.calendar_exceptions()
-    info = schoolcal.day_info(tomorrow, exceptions=exceptions, country=settings.school_country)
+    sc = await _scope(message)
+    if sc is None:
+        return
+    tomorrow = datetime.now(sc.zoneinfo).date() + timedelta(days=1)
+    exceptions = await repo.calendar_exceptions(sc.school_id)
+    info = schoolcal.day_info(tomorrow, exceptions=exceptions, country=sc.country)
     if settings.skip_weekend and not info.is_school_day:
         # Decir por qué y cuándo se vuelve: «no hay colegio» a secas deja al usuario
         # preguntándose si el bot se ha enterado del festivo o simplemente falla.
-        nxt = schoolcal.next_school_day(
-            tomorrow, exceptions=exceptions, country=settings.school_country
-        )
+        nxt = schoolcal.next_school_day(tomorrow, exceptions=exceptions, country=sc.country)
         motivo = f" ({info.reason})" if info.reason else ""
         cuando = (
             f" El próximo día de clase es el {compose.format_date_es(nxt)}."
@@ -76,19 +89,18 @@ async def cmd_manana(message: Message, settings: Settings) -> None:
             f"Mañana es {compose.format_date_es(tomorrow)}: no hay colegio{motivo}.{cuando} 🎉"
         )
         return
-    _, text = await notify.build_daily_message(
-        tomorrow,
-        country=settings.school_country,
-        use_schedule=settings.schedule_enabled,
-    )
+    _, text = await notify.build_daily_message(sc, tomorrow, use_schedule=settings.schedule_enabled)
     await message.answer(text)
 
 
 @router.message(Command("semana"))
 async def cmd_semana(message: Message, settings: Settings) -> None:
-    today = datetime.now(settings.zoneinfo).date()
+    sc = await _scope(message)
+    if sc is None:
+        return
+    today = datetime.now(sc.zoneinfo).date()
     date_from, date_to = chat.week_range(today)
-    entries = await repo.active_entries(date_from, date_to)
+    entries = await repo.active_entries(sc.child_id, date_from, date_to)
     agenda_text = compose.format_agenda(
         entries,
         title="📚 Esta semana:",
@@ -101,7 +113,7 @@ async def cmd_semana(message: Message, settings: Settings) -> None:
         await message.answer(agenda_text)
         return
     monday = date_from - timedelta(days=date_from.weekday())
-    plan = await schedule_service.resolve_week(monday, country=settings.school_country)
+    plan = await schedule_service.resolve_week(sc, monday)
     if not any(plan):
         await message.answer(agenda_text)
         return
@@ -116,8 +128,11 @@ async def cmd_semana(message: Message, settings: Settings) -> None:
 @router.message(Command("horario"))
 async def cmd_horario(message: Message, settings: Settings) -> None:
     """La tabla completa del horario rotativo y en qué semana estamos. Sin LLM."""
-    today = datetime.now(settings.zoneinfo).date()
-    loaded = await schedule_service.load_all(today)
+    sc = await _scope(message)
+    if sc is None:
+        return
+    today = datetime.now(sc.zoneinfo).date()
+    loaded = await schedule_service.load_all(sc, today)
     if not loaded:
         await message.answer(compose.NO_SCHEDULE_TEXT)
         return
@@ -173,4 +188,7 @@ async def cmd_estado(message: Message, settings: Settings, providers: LLMProvide
         await message.answer("🩺 Comprobando proveedores (esto gasta una llamada)...")
         await message.answer(await status.check_providers(providers))
         return
-    await message.answer(await status.build_status(settings, providers))
+    sc = await _scope(message)
+    if sc is None:
+        return
+    await message.answer(await status.build_status(settings, providers, scope=sc))

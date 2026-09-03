@@ -27,17 +27,22 @@ from app.db.models import (
     SourceKind,
     SourceStatus,
 )
+from tests.conftest import TENANT
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 async def test_create_source_and_entry_roundtrip() -> None:
-    source = await Source.objects.acreate(kind=SourceKind.MANUAL)
+    source = await Source.objects.acreate(kind=SourceKind.MANUAL, child_id=TENANT.child_id)
     assert source.status == SourceStatus.PENDING
     assert source.created_at is not None  # db_default=Now() vuelve por RETURNING
 
     entry = await AgendaEntry.objects.acreate(
-        entry_date=date(2026, 9, 3), kind=EntryKind.BRING, text="sudadera", source=source
+        child_id=TENANT.child_id,
+        entry_date=date(2026, 9, 3),
+        kind=EntryKind.BRING,
+        text="sudadera",
+        source=source,
     )
     fetched = await AgendaEntry.objects.select_related("source").aget(pk=entry.pk)
     assert fetched.source.pk == source.pk
@@ -52,7 +57,8 @@ async def test_vector_extension_is_installed() -> None:
 async def test_partial_indexes_and_constraints_exist() -> None:
     entries = await repo.table_constraints("agenda_entries")
     assert entries["agenda_entry_date_active_idx"]["index"] is True
-    assert entries["agenda_entry_date_active_idx"]["columns"] == ["entry_date"]
+    # El niño va primero: el índice tiene que servir para acotar por familia.
+    assert entries["agenda_entry_date_active_idx"]["columns"] == ["child_id", "entry_date"]
     assert "agenda_entries_kind_check" in entries
 
     notifications = await repo.table_constraints("notifications_log")
@@ -64,10 +70,14 @@ async def test_partial_indexes_and_constraints_exist() -> None:
 
 
 async def test_kind_check_constraint_rejects_unknown_values() -> None:
-    source = await Source.objects.acreate(kind=SourceKind.PHOTO)
+    source = await Source.objects.acreate(kind=SourceKind.PHOTO, child_id=TENANT.child_id)
     with pytest.raises(IntegrityError):
         await AgendaEntry.objects.acreate(
-            entry_date=date(2026, 9, 3), kind="bogus", text="x", source=source
+            child_id=TENANT.child_id,
+            entry_date=date(2026, 9, 3),
+            kind="bogus",
+            text="x",
+            source=source,
         )
 
 
@@ -145,9 +155,13 @@ async def test_schedule_tables_and_constraints_exist() -> None:
 
 async def test_a_slot_cannot_repeat_a_weekday_within_a_week() -> None:
     """El unique protege el cálculo: dos materias el mismo día del ciclo sería ambiguo."""
-    source = await Source.objects.acreate(kind=SourceKind.PHOTO)
+    source = await Source.objects.acreate(kind=SourceKind.PHOTO, child_id=TENANT.child_id)
     template = await ScheduleTemplate.objects.acreate(
-        name="H", anchor_monday=date(2026, 8, 31), valid_from=date(2026, 8, 31), source=source
+        child_id=TENANT.child_id,
+        name="H",
+        anchor_monday=date(2026, 8, 31),
+        valid_from=date(2026, 8, 31),
+        source=source,
     )
     await ScheduleSlot.objects.acreate(
         schedule=template, week_index=0, week_label="A", weekday=1, subject="Artes"
@@ -159,7 +173,11 @@ async def test_a_slot_cannot_repeat_a_weekday_within_a_week() -> None:
 
 
 async def test_a_calendar_exception_is_unique_per_day() -> None:
-    await repo.add_calendar_exception(date(2026, 10, 5), "school_closed", "Semana de receso")
-    await repo.add_calendar_exception(date(2026, 10, 5), "school_closed", "Receso (corregido)")
-    exceptions = await repo.calendar_exceptions()
+    await repo.add_calendar_exception(
+        TENANT.school_id, date(2026, 10, 5), "school_closed", "Semana de receso"
+    )
+    await repo.add_calendar_exception(
+        TENANT.school_id, date(2026, 10, 5), "school_closed", "Receso (corregido)"
+    )
+    exceptions = await repo.calendar_exceptions(TENANT.school_id)
     assert exceptions[date(2026, 10, 5)] == ("school_closed", "Receso (corregido)")

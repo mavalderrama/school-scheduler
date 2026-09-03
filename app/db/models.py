@@ -11,6 +11,11 @@ from django.db.models import F, Q
 from django.db.models.functions import Now
 
 
+class MembershipRole(models.TextChoices):
+    OWNER = "owner", "Responsable"
+    PARENT = "parent", "Padre/madre"
+
+
 class UserRole(models.TextChoices):
     PARENT = "parent", "Padre/madre"
     ADMIN = "admin", "Administrador"
@@ -62,8 +67,118 @@ class CalendarKind(models.TextChoices):
     CLASS_DAY = "class_day", "Sí hay clase"
 
 
+class Family(models.Model):
+    """Una familia. Es la unidad de aislamiento: todo cuelga de aquí, directa o
+    indirectamente, y ninguna consulta debe cruzar esta frontera."""
+
+    name = models.TextField(verbose_name="nombre")
+    is_active = models.BooleanField(default=True, db_default=True, verbose_name="activa")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+
+    class Meta:
+        db_table = "families"
+        verbose_name = "familia"
+        verbose_name_plural = "familias"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class School(models.Model):
+    """El colegio de un niño. Los hermanos del mismo colegio comparten calendario.
+
+    `country` y `timezone` viven aquí y no en la configuración global porque dos familias
+    pueden estar en ciudades —o países— distintos.
+    """
+
+    family = models.ForeignKey(
+        "Family", on_delete=models.PROTECT, related_name="schools", verbose_name="familia"
+    )
+    name = models.TextField(verbose_name="nombre")
+    city = models.TextField(blank=True, default="", verbose_name="ciudad")
+    country = models.TextField(default="CO", db_default="CO", verbose_name="país")
+    timezone = models.TextField(
+        default="America/Bogota", db_default="America/Bogota", verbose_name="zona horaria"
+    )
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
+
+    class Meta:
+        db_table = "schools"
+        verbose_name = "colegio"
+        verbose_name_plural = "colegios"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Child(models.Model):
+    """Un niño. **El chat de Telegram determina el niño**, así que no hay que preguntar
+    de quién es cada foto: un grupo por niño."""
+
+    family = models.ForeignKey(
+        "Family", on_delete=models.PROTECT, related_name="children", verbose_name="familia"
+    )
+    school = models.ForeignKey(
+        "School", on_delete=models.PROTECT, related_name="children", verbose_name="colegio"
+    )
+    name = models.TextField(verbose_name="nombre")
+    chat_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        unique=True,
+        verbose_name="chat de Telegram",
+        help_text="El grupo de este niño. Un chat pertenece como mucho a un niño.",
+    )
+    is_active = models.BooleanField(default=True, db_default=True, verbose_name="activo")
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
+
+    class Meta:
+        db_table = "children"
+        verbose_name = "niño"
+        verbose_name_plural = "niños"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Membership(models.Model):
+    """Quién puede ver qué familia. Sustituye a la whitelist de variables de entorno."""
+
+    family = models.ForeignKey(
+        "Family", on_delete=models.PROTECT, related_name="memberships", verbose_name="familia"
+    )
+    user = models.ForeignKey(
+        "User", on_delete=models.PROTECT, related_name="memberships", verbose_name="usuario"
+    )
+    role = models.TextField(
+        choices=MembershipRole,
+        default=MembershipRole.PARENT,
+        db_default=MembershipRole.PARENT,
+        verbose_name="rol",
+    )
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creada")
+
+    class Meta:
+        db_table = "memberships"
+        verbose_name = "membresía"
+        verbose_name_plural = "membresías"
+        constraints = [
+            models.UniqueConstraint(fields=["family", "user"], name="membership_unique"),
+            models.CheckConstraint(
+                condition=Q(role__in=MembershipRole.values), name="membership_role_check"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} en {self.family_id}"
+
+
 class User(models.Model):
-    """Padre o madre en la whitelist. La PK es el id de Telegram."""
+    """Padre o madre. La PK es el id de Telegram.
+
+    A qué familias pertenece lo dice `Membership`: un mismo adulto puede estar en más de
+    una (padres separados, abuelos que ayudan).
+    """
 
     telegram_user_id = models.BigIntegerField(primary_key=True, verbose_name="id de Telegram")
     display_name = models.TextField(verbose_name="nombre")
@@ -85,6 +200,9 @@ class User(models.Model):
 class Source(models.Model):
     """Cada foto, corrección por texto o alta manual."""
 
+    child = models.ForeignKey(
+        "Child", on_delete=models.PROTECT, related_name="sources", verbose_name="niño"
+    )
     kind = models.TextField(choices=SourceKind, verbose_name="tipo")
     telegram_file_id = models.TextField(null=True, blank=True)
     local_path = models.TextField(null=True, blank=True, verbose_name="ruta local")
@@ -145,6 +263,12 @@ class Source(models.Model):
 
 
 class AgendaEntry(models.Model):
+    # Desnormalizado a propósito aunque se deduzca por `source`: el merge por fecha y el
+    # índice parcial necesitan el niño como primera columna, y una entrada sin dueño
+    # explícito es exactamente el fallo que borraría la agenda de otra familia.
+    child = models.ForeignKey(
+        "Child", on_delete=models.PROTECT, related_name="entries", verbose_name="niño"
+    )
     entry_date = models.DateField(verbose_name="fecha")
     kind = models.TextField(choices=EntryKind, verbose_name="tipo")
     text = models.TextField(verbose_name="texto")
@@ -178,7 +302,7 @@ class AgendaEntry(models.Model):
         ]
         indexes = [
             models.Index(
-                fields=["entry_date"],
+                fields=["child", "entry_date"],
                 condition=Q(is_active=True),
                 name="agenda_entry_date_active_idx",
             ),
@@ -218,6 +342,14 @@ class ConversationMessage(models.Model):
 class NotificationLog(models.Model):
     """Registro de envíos. Idempotencia: un solo envío ok por (kind, target_date, chat_id)."""
 
+    child = models.ForeignKey(
+        "Child",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="notifications",
+        verbose_name="niño",
+    )
     kind = models.TextField(choices=NotificationKind, verbose_name="tipo")
     target_date = models.DateField(null=True, blank=True, verbose_name="fecha objetivo")
     chat_id = models.BigIntegerField()
@@ -230,8 +362,10 @@ class NotificationLog(models.Model):
         verbose_name = "notificación"
         verbose_name_plural = "notificaciones"
         constraints = [
+            # El niño entra en la clave: dos hermanos en el mismo chat compartirían ranura
+            # y el segundo aviso se descartaría por idempotencia.
             models.UniqueConstraint(
-                fields=["kind", "target_date", "chat_id"],
+                fields=["kind", "target_date", "chat_id", "child"],
                 condition=Q(ok=True),
                 nulls_distinct=False,
                 name="notif_log_ok_unique",
@@ -245,6 +379,14 @@ class NotificationLog(models.Model):
 class LLMCall(models.Model):
     """Consumo por proveedor, para vigilar cuota y costo."""
 
+    family = models.ForeignKey(
+        "Family",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="llm_calls",
+        verbose_name="familia",
+    )
     provider = models.TextField(verbose_name="proveedor")
     task = models.TextField(choices=LLMTask, verbose_name="tarea")
     model = models.TextField(null=True, blank=True, verbose_name="modelo")
@@ -312,6 +454,9 @@ class ScheduleTemplate(models.Model):
     admin, tumbaba la notificación diaria.
     """
 
+    child = models.ForeignKey(
+        "Child", on_delete=models.PROTECT, related_name="schedules", verbose_name="niño"
+    )
     name = models.TextField(verbose_name="nombre")
     anchor_monday = models.DateField(
         verbose_name="lunes ancla",
@@ -356,7 +501,9 @@ class ScheduleTemplate(models.Model):
         ]
         indexes = [
             models.Index(
-                fields=["valid_from"], condition=Q(is_active=True), name="schedule_active_idx"
+                fields=["child", "valid_from"],
+                condition=Q(is_active=True),
+                name="schedule_active_idx",
             ),
         ]
 
@@ -410,7 +557,10 @@ class CalendarException(models.Model):
     sí tiene clase.
     """
 
-    day = models.DateField(unique=True, verbose_name="día")
+    school = models.ForeignKey(
+        "School", on_delete=models.PROTECT, related_name="calendar", verbose_name="colegio"
+    )
+    day = models.DateField(verbose_name="día")
     kind = models.TextField(choices=CalendarKind, verbose_name="tipo")
     label = models.TextField(verbose_name="motivo")
     created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
@@ -423,6 +573,9 @@ class CalendarException(models.Model):
             models.CheckConstraint(
                 condition=Q(kind__in=CalendarKind.values), name="calendar_exceptions_kind_check"
             ),
+            # Antes el día era único globalmente: dos colegios no podían tener excepción el
+            # mismo día y el segundo sobrescribía al primero en silencio.
+            models.UniqueConstraint(fields=["school", "day"], name="calendar_school_day_unique"),
         ]
 
     def __str__(self) -> str:

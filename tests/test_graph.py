@@ -20,7 +20,7 @@ from app.graph.build import build_graph, checkpointer_pool
 from app.graph.runner import GraphRunner
 from app.graph.state import GraphContext, GraphState
 from app.llm.schemas import ExtractionResult, ScheduleDraft, SlotDraft
-from tests.conftest import TEST_DATABASE_URL
+from tests.conftest import TENANT, TEST_DATABASE_URL
 from tests.test_ingest import providers
 from tests.test_provider import FakeProvider
 
@@ -59,6 +59,7 @@ async def fake_download(file_id: str, destination: Path) -> None:
 def photo_state(queue: list[dict[str, Any]] | None = None) -> GraphState:
     return {
         "chat_id": CHAT,
+        "child_id": TENANT.child_id,
         "flow": "photo",
         "photo": {
             "file_id": "f1",
@@ -122,7 +123,7 @@ async def test_the_conversation_survives_a_restart(settings: Settings, clean_thr
         assert resumed is not None and resumed.finished
         assert resumed.reply is not None and "Guardado" in resumed.reply
 
-    template = await repo.active_schedule(date(2026, 9, 2))
+    template = await repo.active_schedule(TENANT.child_id, date(2026, 9, 2))
     assert template is not None and template.anchor_monday == ANCHOR
 
 
@@ -141,7 +142,7 @@ async def test_a_photo_awaiting_confirmation_survives_a_restart(
         resumed = await runner.resume(CHAT, {"action": "confirm"})
         assert resumed is not None and resumed.finished and resumed.reply is not None
 
-    assert await repo.active_schedule(date(2026, 9, 2)) is not None
+    assert await repo.active_schedule(TENANT.child_id, date(2026, 9, 2)) is not None
 
 
 async def test_the_photo_queue_survives_a_restart(settings: Settings, clean_thread: None) -> None:
@@ -191,7 +192,7 @@ async def test_cancelling_during_a_question_discards_the_photo(
         resumed = await runner.resume(CHAT, "descarta")
         assert resumed is not None and resumed.finished
         assert resumed.reply is not None and "descarto" in resumed.reply.lower()
-    assert await repo.active_schedule(date(2026, 9, 2)) is None
+    assert await repo.active_schedule(TENANT.child_id, date(2026, 9, 2)) is None
 
 
 async def test_the_question_round_is_still_bounded(settings: Settings, clean_thread: None) -> None:

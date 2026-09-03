@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from app.db import repo
 from app.db.models import ScheduleSlot, ScheduleTemplate
 from app.services import schoolcal
+from app.services.scope import Scope
 
 MAX_HORIZON_DAYS = 400
 
@@ -180,65 +181,63 @@ class LoadedSchedule:
     exceptions: dict[date, tuple[str, str]]
 
 
-async def load_all(day: date | None = None) -> list[LoadedSchedule]:
-    """Todas las plantillas vigentes con sus franjas. Una sola consulta de franjas."""
-    templates = await repo.active_schedules(day)
+async def load_all(scope: Scope, day: date | None = None) -> list[LoadedSchedule]:
+    """Todas las plantillas vigentes del niño con sus franjas. Una consulta de franjas."""
+    templates = await repo.active_schedules(scope.child_id, day)
     if not templates:
         return []
     slots = await repo.slots_for_schedules([t.pk for t in templates])
-    exceptions = await repo.calendar_exceptions()
+    exceptions = await repo.calendar_exceptions(scope.school_id)
     return [
         LoadedSchedule(template=t, slots=slots.get(t.pk, []), exceptions=exceptions)
         for t in templates
     ]
 
 
-async def load(day: date | None = None) -> LoadedSchedule | None:
+async def load(scope: Scope, day: date | None = None) -> LoadedSchedule | None:
     """La primera plantilla vigente. Para cuando solo hace falta saber si hay alguna."""
-    loaded = await load_all(day)
+    loaded = await load_all(scope, day)
     return loaded[0] if loaded else None
 
 
-async def resolve_day(day: date, *, country: str = "CO") -> list[SlotResult]:
+async def resolve_day(scope: Scope, day: date) -> list[SlotResult]:
     """Qué toca ese día, **una entrada por horario vigente**.
 
     Lista vacía = no hay ningún horario cargado, que no es lo mismo que no haber clase.
     Si el día entero no es lectivo se devuelve una sola entrada con el motivo: es una
     propiedad del calendario, no de cada horario, y repetirla por horario sobra.
     """
-    loaded = await load_all(day)
+    loaded = await load_all(scope, day)
     if not loaded:
         return []
 
-    info = schoolcal.day_info(day, exceptions=loaded[0].exceptions, country=country)
+    info = schoolcal.day_info(day, exceptions=loaded[0].exceptions, country=scope.country)
     if not info.is_school_day:
         return [SlotResult(day, skipped_reason=info.reason)]
 
     results = [
-        slot_for(day, item.template, item.slots, exceptions=item.exceptions, country=country)
+        slot_for(day, item.template, item.slots, exceptions=item.exceptions, country=scope.country)
         for item in loaded
     ]
     return [r for r in results if r.subject is not None]
 
 
-async def resolve(day: date, *, country: str = "CO") -> SlotResult | None:
+async def resolve(scope: Scope, day: date) -> SlotResult | None:
     """La primera franja del día. Se conserva para quien solo necesita una."""
-    results = await resolve_day(day, country=country)
+    results = await resolve_day(scope, day)
     return results[0] if results else None
 
 
-async def resolve_week(monday: date, *, country: str = "CO") -> list[list[SlotResult]]:
+async def resolve_week(scope: Scope, monday: date) -> list[list[SlotResult]]:
     """Los cinco días hábiles; cada uno con lo que dice cada horario vigente."""
-    return [
-        await resolve_day(monday + timedelta(days=offset), country=country) for offset in range(5)
-    ]
+    return [await resolve_day(scope, monday + timedelta(days=offset)) for offset in range(5)]
 
 
 async def find_subject(
-    subject: str, since: date, *, country: str = "CO", count: int = 3
+    scope: Scope, subject: str, since: date, *, count: int = 3
 ) -> list[SlotResult]:
     """Próximas veces que toca una materia, mirando en todos los horarios vigentes."""
-    loaded = await load_all(since)
+    loaded = await load_all(scope, since)
     if not loaded:
         return []
     found: list[SlotResult] = []
@@ -250,7 +249,7 @@ async def find_subject(
                 item.template,
                 item.slots,
                 exceptions=item.exceptions,
-                country=country,
+                country=scope.country,
                 count=count,
             )
         )

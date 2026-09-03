@@ -17,6 +17,7 @@ from app.db import repo
 from app.llm.provider import FallbackProvider, LLMProviders, LLMUnavailableError
 from app.llm.schemas import ExtractedEntry, ExtractionResult
 from app.services import cache, chat, ingest
+from tests.conftest import TENANT
 from tests.test_ingest import fake_download
 from tests.test_provider import FakeProvider
 
@@ -58,6 +59,7 @@ async def run_photo(settings: Settings, provider: FakeProvider) -> None:
         download=fake_download,
         settings=settings,
         providers=chain(provider),
+        child_id=TENANT.child_id,
     )
 
 

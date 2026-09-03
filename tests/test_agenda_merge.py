@@ -10,6 +10,7 @@ from app.db import repo
 from app.db.models import SourceKind, SourceStatus
 from app.llm.schemas import ExtractedEntry, ExtractionResult
 from app.services import agenda
+from tests.conftest import TENANT
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -28,12 +29,14 @@ def extraction(*entries: tuple[date, str, str]) -> ExtractionResult:
 
 
 async def new_source() -> int:
-    source = await repo.create_source(SourceKind.PHOTO, telegram_file_id="f")
+    source = await repo.create_source(
+        SourceKind.PHOTO, telegram_file_id="f", child_id=TENANT.child_id
+    )
     return source.pk
 
 
 async def active_texts(day: date) -> list[str]:
-    return [e.text for e in await repo.active_entries(day, day)]
+    return [e.text for e in await repo.active_entries(TENANT.child_id, day, day)]
 
 
 async def test_new_date_inserts_and_confirms() -> None:

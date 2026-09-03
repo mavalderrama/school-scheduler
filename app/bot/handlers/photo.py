@@ -12,7 +12,9 @@ from aiogram.types import Message
 from app.bot.deliver import deliver
 from app.graph.runner import GraphRunner
 from app.graph.state import GraphState
+from app.llm import compose
 from app.log import get_logger
+from app.services import scope
 
 log = get_logger(__name__)
 router = Router(name="photo")
@@ -35,6 +37,10 @@ async def on_photo(message: Message, bot: Bot, runner: GraphRunner) -> None:
     if message.from_user is None or not message.photo:
         return
     chat_id = message.chat.id
+    sc = await scope.for_chat(chat_id)
+    if sc is None:
+        await message.answer(compose.NOT_LINKED_TEXT)
+        return
     payload = photo_payload(message)
 
     if await runner.is_waiting(chat_id):
@@ -49,6 +55,7 @@ async def on_photo(message: Message, bot: Bot, runner: GraphRunner) -> None:
     await bot.send_message(chat_id, READING_TEXT)
     state: GraphState = {
         "chat_id": chat_id,
+        "child_id": sc.child_id,
         "flow": "photo",
         "photo": payload,
         "queue": [],
