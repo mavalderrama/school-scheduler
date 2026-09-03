@@ -6,12 +6,11 @@ from datetime import date
 
 import pytest
 
-from app.bot import actions
 from app.db import repo
 from app.db.models import SourceKind, SourceStatus
+from app.graph import nodes
 from app.llm.schemas import ExtractedEntry, ExtractionResult
 from app.services import agenda
-from app.services.confirm import PendingEdit
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -79,27 +78,39 @@ async def test_remove_entry_twice_is_harmless() -> None:
     assert await agenda.remove_entry(target.pk) is False
 
 
+async def apply_edit(edit: dict[str, object], entry_id: int | None = None) -> str:
+    """Ejecuta el nodo del grafo que aplica un alta o una baja ya confirmada."""
+    state = {"edit": edit, "user_id": None, "decision": {"entry_id": entry_id}}
+    result = await nodes.apply_edit(state, None)  # type: ignore[arg-type]
+    return str(result["reply"])
+
+
 async def test_apply_edit_add_and_remove() -> None:
-    add = PendingEdit(
-        edit_id=1, chat_id=1, action="add", entry_date=WED, kind="bring", text="botella"
-    )
-    assert "Agregado" in await actions.apply_edit(add, None)
+    add = {
+        "edit_id": 1,
+        "chat_id": 1,
+        "action": "add",
+        "entry_date": WED.isoformat(),
+        "kind": "bring",
+        "text": "botella",
+    }
+    assert "Agregado" in await apply_edit(add)
     assert await texts(WED) == ["botella"]
 
     entry = (await repo.active_entries(WED, WED))[0]
-    remove = PendingEdit(edit_id=2, chat_id=1, action="remove", entry_date=WED, entry_id=entry.pk)
-    assert "Quitado" in await actions.apply_edit(remove, None)
+    remove = {"edit_id": 2, "chat_id": 1, "action": "remove", "entry_id": entry.pk}
+    assert "Quitado" in await apply_edit(remove)
     assert await texts(WED) == []
 
 
 async def test_apply_edit_on_a_vanished_entry() -> None:
-    edit = PendingEdit(edit_id=3, chat_id=1, action="remove", entry_date=WED, entry_id=999_999)
-    assert "ya no está vigente" in await actions.apply_edit(edit, None)
+    edit = {"edit_id": 3, "chat_id": 1, "action": "remove", "entry_id": 999_999}
+    assert "ya no está vigente" in await apply_edit(edit)
 
 
 async def test_apply_edit_remove_without_target() -> None:
-    edit = PendingEdit(edit_id=4, chat_id=1, action="remove", entry_date=WED)
-    assert "No sé cuál quitar" in await actions.apply_edit(edit, None)
+    edit = {"edit_id": 4, "chat_id": 1, "action": "remove"}
+    assert "No sé cuál quitar" in await apply_edit(edit)
 
 
 async def test_conversation_history_roundtrip() -> None:

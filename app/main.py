@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import signal
 import sys
+from pathlib import Path
 
 from app.django_bootstrap import setup_django
 
@@ -30,11 +31,13 @@ from app.config import (  # noqa: E402
     startup_warnings,
 )
 from app.db import repo  # noqa: E402
-from app.llm.provider import build_providers  # noqa: E402
+from app.graph.build import build_graph, checkpointer_pool  # noqa: E402
+from app.graph.runner import GraphRunner  # noqa: E402
+from app.graph.state import GraphContext  # noqa: E402
+from app.llm.provider import LLMProviders, build_providers  # noqa: E402
 from app.log import configure_logging, get_logger  # noqa: E402
 from app.obs import setup_tracing  # noqa: E402
 from app.scheduler.jobs import build_scheduler, register_jobs  # noqa: E402
-from app.services.confirm import PendingStore  # noqa: E402
 from app.web import admin_url, build_admin_server  # noqa: E402
 
 log = get_logger(__name__)
@@ -65,8 +68,26 @@ async def run(settings: Settings) -> None:
     log.info("llm_providers", vision=providers.vision.name, text=providers.text.name)
 
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    pending = PendingStore()
-    dp = Dispatcher(settings=settings, providers=providers, pending=pending)
+
+    async def download(file_id: str, destination: Path) -> None:
+        await bot.download(file_id, destination=destination)
+
+    # El checkpointer vive lo que vive el proceso; su pool es propio, no el de Django.
+    async with checkpointer_pool(settings.database_url) as saver:
+        graph = build_graph().compile(checkpointer=saver)
+        runner = GraphRunner(
+            graph,
+            GraphContext(settings=settings, providers=providers, download=download),
+            saver,
+            ttl_hours=settings.graph_state_ttl_hours,
+        )
+        await _serve(settings, bot, providers, runner)
+
+
+async def _serve(
+    settings: Settings, bot: Bot, providers: LLMProviders, runner: GraphRunner
+) -> None:
+    dp = Dispatcher(settings=settings, providers=providers, runner=runner)
     dp.update.outer_middleware(AuthMiddleware(settings.allowed_user_ids, settings.allowed_chat_ids))
     dp.update.outer_middleware(DjangoDBMiddleware())
     dp.include_router(commands.router)
@@ -75,7 +96,7 @@ async def run(settings: Settings) -> None:
     dp.include_router(text.router)
 
     scheduler = build_scheduler(settings)
-    register_jobs(scheduler, settings, bot, providers, pending)
+    register_jobs(scheduler, settings, bot, providers, runner)
     scheduler.start()
 
     server = build_admin_server(settings) if settings.admin_enabled else None

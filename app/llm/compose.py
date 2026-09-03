@@ -348,6 +348,20 @@ def format_question(question: str, *, remaining: int) -> str:
     return f"❓ {html.escape(question)}\n{tail}\n<i>Si prefieres dejarlo, dime «descarta».</i>"
 
 
+REJECTED_TEXT = (
+    "❌ Listo, lo descarto. No guardé nada de esta foto; mándamela otra vez cuando quieras."
+)
+
+REFINE_FAILED_TEXT = (
+    "⚠️ La IA no respondió, así que no pude procesarlo. Puedes contestarme otra vez "
+    "o dejarlo con el botón."
+)
+
+CORRECTION_FAILED_TEXT = (
+    "⚠️ No pude aplicar la corrección ahora (el proveedor de IA no respondió). "
+    "Inténtalo otra vez o usa ❌ para descartar."
+)
+
 GIVE_UP_TEXT = (
     "No consigo entender lo que falta. Descarto la foto con ❌ y la mandas de nuevo, "
     "o me lo cuentas de otra forma."

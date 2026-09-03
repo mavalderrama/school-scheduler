@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from app.config import Settings
 from app.db import repo
@@ -20,7 +21,6 @@ from app.llm.schemas import ChatTurn, Intent
 from app.log import get_logger
 from app.services import cache
 from app.services import schedule as schedule_service
-from app.services.confirm import PendingEdit, PendingStore
 
 log = get_logger(__name__)
 
@@ -86,11 +86,25 @@ def is_cancel(text: str) -> bool:
 
 @dataclass
 class ChatReply:
-    """Respuesta lista para enviar; `edit` y `candidates` piden teclado al handler."""
+    """Respuesta lista para enviar; `edit` y `candidates` piden teclado al handler.
+
+    `edit` es un dict y no un dataclass porque va tal cual al estado del grafo, que se
+    guarda en el checkpointer.
+    """
 
     text: str
-    edit: PendingEdit | None = None
+    edit: dict[str, Any] | None = None
     candidates: list[tuple[int, str]] | None = None
+
+
+def _new_edit_id() -> int:
+    """Identificador de los botones de una edición.
+
+    Antes era un contador en memoria que al reiniciar volvía a 1 y podía chocar con
+    botones viejos. Ahora quien impide reanudar algo caducado es el grafo; esto solo
+    distingue mensajes dentro de una conversación.
+    """
+    return int(time.time() * 1000) % 2_000_000_000
 
 
 def week_range(today: date) -> tuple[date, date]:
@@ -216,28 +230,25 @@ async def query_range(intent: Intent, today: date, *, country: str = "CO") -> Ch
     )
 
 
-async def prepare_add(intent: Intent, today: date, store: PendingStore, chat_id: int) -> ChatReply:
+async def prepare_add(intent: Intent, today: date, chat_id: int) -> ChatReply:
     if intent.date_from is None or not intent.text:
         return ChatReply(
             text="¿Para qué día y qué agrego? Por ejemplo: «agrega que el martes lleva disfraz»."
         )
-    edit = PendingEdit(
-        edit_id=store.new_edit_id(),
-        chat_id=chat_id,
-        action="add",
-        entry_date=intent.date_from,
-        kind=intent.kind or "note",
-        text=intent.text.strip(),
-    )
-    return ChatReply(
-        text=compose.format_add_question(edit.entry_date, edit.kind or "note", edit.text or ""),
-        edit=edit,
-    )
+    text = intent.text.strip()
+    kind = intent.kind or "note"
+    edit: dict[str, Any] = {
+        "edit_id": _new_edit_id(),
+        "chat_id": chat_id,
+        "action": "add",
+        "entry_date": intent.date_from.isoformat(),
+        "kind": kind,
+        "text": text,
+    }
+    return ChatReply(text=compose.format_add_question(intent.date_from, kind, text), edit=edit)
 
 
-async def prepare_remove(
-    intent: Intent, today: date, store: PendingStore, chat_id: int
-) -> ChatReply:
+async def prepare_remove(intent: Intent, today: date, chat_id: int) -> ChatReply:
     date_from = intent.date_from or today
     date_to = intent.date_to or date_from
     candidates = await repo.find_active_entries(date_from, date_to, intent.target_entry_hint)
@@ -252,25 +263,26 @@ async def prepare_remove(
 
     if len(candidates) == 1:
         entry = candidates[0]
-        edit = PendingEdit(
-            edit_id=store.new_edit_id(),
-            chat_id=chat_id,
-            action="remove",
-            entry_date=entry.entry_date,
-            entry_id=entry.pk,
+        return ChatReply(
+            text=compose.format_remove_question(entry),
+            edit={
+                "edit_id": _new_edit_id(),
+                "chat_id": chat_id,
+                "action": "remove",
+                "entry_date": entry.entry_date.isoformat(),
+                "entry_id": entry.pk,
+            },
         )
-        return ChatReply(text=compose.format_remove_question(entry), edit=edit)
 
     shortlist = candidates[:MAX_CANDIDATES]
-    edit = PendingEdit(
-        edit_id=store.new_edit_id(),
-        chat_id=chat_id,
-        action="remove",
-        entry_date=date_from,
-    )
     return ChatReply(
         text=compose.format_candidates(shortlist),
-        edit=edit,
+        edit={
+            "edit_id": _new_edit_id(),
+            "chat_id": chat_id,
+            "action": "remove",
+            "entry_date": date_from.isoformat(),
+        },
         candidates=[(e.pk, candidate_label(e)) for e in shortlist],
     )
 
@@ -287,7 +299,7 @@ async def query_subject(intent: Intent, today: date, *, country: str = "CO") -> 
 
 
 async def dispatch(
-    intent: Intent, *, today: date, store: PendingStore, chat_id: int, country: str = "CO"
+    intent: Intent, *, today: date, chat_id: int, country: str = "CO", store: object = None
 ) -> ChatReply:
     """Intención ya clasificada → respuesta. `confirm`/`reject`/`correct_pending` los
     resuelve el handler porque necesitan el estado pendiente y los proveedores."""
@@ -296,9 +308,9 @@ async def dispatch(
     if intent.action == "query_subject":
         return await query_subject(intent, today, country=country)
     if intent.action == "add_entry":
-        return await prepare_add(intent, today, store, chat_id)
+        return await prepare_add(intent, today, chat_id)
     if intent.action == "remove_entry":
-        return await prepare_remove(intent, today, store, chat_id)
+        return await prepare_remove(intent, today, chat_id)
     if intent.action == "help":
         return ChatReply(text=compose.HELP_TEXT)
     return ChatReply(

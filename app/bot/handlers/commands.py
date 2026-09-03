@@ -4,17 +4,18 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
+from app.bot.deliver import deliver
 from app.config import Settings
 from app.db import repo
+from app.graph.runner import GraphRunner
 from app.llm import compose
 from app.llm.provider import LLMProviders
 from app.services import chat, notify, status
 from app.services import schedule as schedule_service
-from app.services.confirm import PendingEdit, PendingPhoto, PendingQuestions, PendingStore
 
 router = Router(name="commands")
 
@@ -116,58 +117,37 @@ async def cmd_horario(message: Message, settings: Settings) -> None:
 
 
 @router.message(Command("pendiente"))
-async def cmd_pendiente(message: Message, pending: PendingStore) -> None:
-    current = pending.get(message.chat.id)
-    if current is None:
-        queued = pending.queued(message.chat.id)
+async def cmd_pendiente(message: Message, runner: GraphRunner) -> None:
+    """Qué está esperando el bot en este chat. El estado sale del grafo, no de la memoria."""
+    ask = await runner.pending_ask(message.chat.id)
+    if ask is None:
+        state = await runner.snapshot(message.chat.id)
+        queued = len(state.get("queue", [])) if state else 0
         extra = f" Hay {queued} foto(s) en cola." if queued else ""
         await message.answer(f"No hay nada pendiente de confirmar.{extra}")
         return
-    if isinstance(current, PendingPhoto):
-        await message.answer(
-            "📷 Hay una foto pendiente de confirmar:\n\n"
-            + compose.format_extraction(current.extraction)
-        )
+    if ask.kind == "ask":
+        await message.answer("❓ Te hice una pregunta y sigo esperando:\n\n" + (ask.text or ""))
         return
-    if isinstance(current, PendingQuestions):
-        await message.answer(
-            "❓ Te hice una pregunta y sigo esperando la respuesta:\n\n"
-            + compose.format_question(current.current or "", remaining=0)
-        )
+    if ask.kind == "correction":
+        await message.answer("✏️ Estoy esperando que me digas qué corrijo.")
         return
-    if isinstance(current, PendingEdit) and current.action == "add":
-        await message.answer(
-            "✍️ Pendiente: "
-            + compose.format_add_question(
-                current.entry_date, current.kind or "note", current.text or ""
-            )
-        )
+    if ask.kind == "edit":
+        await message.answer("✍️ Hay un cambio pendiente de confirmar.")
         return
-    await message.answer("✍️ Hay una baja pendiente de confirmar.")
+    await message.answer("📷 Hay una lectura pendiente de confirmar:\n\n" + (ask.text or ""))
 
 
 @router.message(Command("cancelar"))
-async def cmd_cancelar(
-    message: Message,
-    settings: Settings,
-    providers: LLMProviders,
-    pending: PendingStore,
-) -> None:
+async def cmd_cancelar(message: Message, bot: Bot, runner: GraphRunner) -> None:
     """Salida de emergencia sin LLM: descarta lo que haya pendiente en este chat."""
-    from app.bot import actions
-
     chat_id = message.chat.id
-    current = pending.get(chat_id)
-    if current is None:
+    if not await runner.is_waiting(chat_id):
         await message.answer("No hay nada pendiente que cancelar.")
         return
-    if isinstance(current, PendingEdit):
-        pending.clear(chat_id)
-        await message.answer("Listo, no cambio nada.")
-        return
-    await message.answer(await actions.reject_photo(current))
-    if message.bot is not None:
-        await actions.continue_queue(message.bot, chat_id, settings, providers, pending)
+    turn = await runner.cancel(chat_id)
+    if turn is not None:
+        await deliver(bot, chat_id, turn)
 
 
 @router.message(Command("estado"))

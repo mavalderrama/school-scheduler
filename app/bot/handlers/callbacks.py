@@ -1,168 +1,112 @@
-"""Botones: ✅/✏️/❌ de una foto, ✅/❌ de un alta o baja, y elección de candidata."""
+"""Botones: todos reanudan el grafo con la decisión que pulsó el usuario.
+
+El grafo comprueba si el hilo está esperando algo antes de reanudar, así que un botón de
+un mensaje viejo (o una doble pulsación) se ignora en vez de envenenar la conversación
+siguiente.
+"""
 
 from __future__ import annotations
+
+from typing import Any
 
 from aiogram import Bot, Router
 from aiogram.types import CallbackQuery, Message
 
-from app.bot import actions
+from app.bot.deliver import deliver
 from app.bot.keyboards import (
     CandidateCallback,
     EditCallback,
     ScheduleCallback,
     SourceCallback,
 )
-from app.config import Settings
-from app.llm import compose
-from app.llm.provider import LLMProviders
+from app.graph.runner import GraphRunner
 from app.log import get_logger
-from app.services.confirm import PendingEdit, PendingPhoto, PendingQuestions, PendingStore
 
 log = get_logger(__name__)
 router = Router(name="callbacks")
 
+STALE = "Esto ya no está activo."
 
-@router.callback_query(SourceCallback.filter())
-async def on_source_action(
-    query: CallbackQuery,
-    callback_data: SourceCallback,
-    bot: Bot,
-    settings: Settings,
-    providers: LLMProviders,
-    pending: PendingStore,
+
+async def _resume(
+    query: CallbackQuery, bot: Bot, runner: GraphRunner, value: dict[str, Any], notice: str
 ) -> None:
+    """Reanuda el grafo y manda lo que salga. Común a todos los botones."""
     message = query.message
     if not isinstance(message, Message):
         await query.answer("Este mensaje ya no está disponible.")
         return
     chat_id = message.chat.id
-    current = pending.get(chat_id)
-    # ❌ vale también sobre un interrogatorio a medias: es el botón de salida mientras el
-    # bot pregunta. ✅ y ✏️ solo tienen sentido con una lectura ya completa.
-    if not isinstance(current, PendingPhoto | PendingQuestions):
-        await query.answer("Esta lectura ya no está activa.")
-        await message.edit_reply_markup(reply_markup=None)
-        return
-    if current.source_id != callback_data.source_id:
-        await query.answer("Esta lectura ya no está activa.")
+    turn = await runner.resume(chat_id, value)
+    if turn is None:
+        await query.answer(STALE)
         await message.edit_reply_markup(reply_markup=None)
         return
 
-    if isinstance(current, PendingQuestions):
-        if callback_data.action != "reject":
-            await query.answer("Primero respóndeme la pregunta, o descarta la foto.")
-            return
-        await query.answer("Descartado")
-        await message.edit_text(await actions.reject_photo(current))
-        await actions.continue_queue(bot, chat_id, settings, providers, pending)
-        return
-
-    if callback_data.action == "confirm":
-        summary = await actions.confirm_photo(current, settings)
-        await query.answer("Guardado")
-        await message.edit_text(
-            compose.format_extraction(current.extraction).rsplit("\n", 1)[0] + "\n\n" + summary
-        )
-        await actions.continue_queue(bot, chat_id, settings, providers, pending)
-        return
-
-    if callback_data.action == "reject":
-        await query.answer("Descartado")
-        await message.edit_text(await actions.reject_photo(current))
-        await actions.continue_queue(bot, chat_id, settings, providers, pending)
-        return
-
-    # correct
-    current.awaiting_correction = True
-    await query.answer()
+    await query.answer(notice)
     await message.edit_reply_markup(reply_markup=None)
-    await bot.send_message(
-        chat_id,
-        "✏️ Dime qué corrijo en un mensaje (por ejemplo: «el disfraz es el jueves, no el "
-        "martes» o «quita la tarea de matemáticas»).",
+    await deliver(bot, chat_id, turn)
+    if turn.finished:
+        nxt = await runner.drain(chat_id)
+        if nxt is not None:
+            await bot.send_message(chat_id, "Sigo con la siguiente foto de la cola.")
+            await deliver(bot, chat_id, nxt)
+
+
+@router.callback_query(SourceCallback.filter())
+async def on_source_action(
+    query: CallbackQuery, callback_data: SourceCallback, bot: Bot, runner: GraphRunner
+) -> None:
+    """✅ / ✏️ / ❌ de una foto (❌ vale también durante el interrogatorio)."""
+    notices = {"confirm": "Guardado", "reject": "Descartado", "correct": "Dime"}
+    await _resume(
+        query,
+        bot,
+        runner,
+        {"action": callback_data.action, "source_id": callback_data.source_id},
+        notices.get(callback_data.action, "Hecho"),
     )
 
 
 @router.callback_query(ScheduleCallback.filter())
 async def on_schedule_action(
-    query: CallbackQuery,
-    callback_data: ScheduleCallback,
-    bot: Bot,
-    settings: Settings,
-    providers: LLMProviders,
-    pending: PendingStore,
+    query: CallbackQuery, callback_data: ScheduleCallback, bot: Bot, runner: GraphRunner
 ) -> None:
     """Horario nuevo con otros vigentes: añadirlo aparte o reemplazar uno concreto."""
-    message = query.message
-    if not isinstance(message, Message):
-        await query.answer("Este mensaje ya no está disponible.")
-        return
-    chat_id = message.chat.id
-    current = pending.get(chat_id)
-    if not isinstance(current, PendingPhoto) or current.source_id != callback_data.source_id:
-        await query.answer("Esta lectura ya no está activa.")
-        await message.edit_reply_markup(reply_markup=None)
-        return
-
     replace_ids = [callback_data.target] if callback_data.action == "replace" else []
-    summary = await actions.confirm_photo(current, settings, replace_ids=replace_ids)
-    await query.answer("Guardado")
-    await message.edit_text(
-        compose.format_extraction(current.extraction).rsplit("\n", 1)[0] + "\n\n" + summary
+    await _resume(
+        query,
+        bot,
+        runner,
+        {"action": "confirm", "replace_ids": replace_ids},
+        "Guardado",
     )
-    await actions.continue_queue(bot, chat_id, settings, providers, pending)
 
 
 @router.callback_query(EditCallback.filter())
 async def on_edit_action(
-    query: CallbackQuery,
-    callback_data: EditCallback,
-    pending: PendingStore,
+    query: CallbackQuery, callback_data: EditCallback, bot: Bot, runner: GraphRunner
 ) -> None:
     """✅ / ❌ de un alta o una baja pedida por texto."""
-    message = query.message
-    if not isinstance(message, Message):
-        await query.answer("Este mensaje ya no está disponible.")
-        return
-    chat_id = message.chat.id
-    current = pending.get(chat_id)
-    if not isinstance(current, PendingEdit) or current.edit_id != callback_data.edit_id:
-        await query.answer("Esto ya no está activo.")
-        await message.edit_reply_markup(reply_markup=None)
-        return
-
-    user_id = query.from_user.id
-    if callback_data.action == "reject":
-        pending.clear(chat_id)
-        await query.answer("Cancelado")
-        await message.edit_text("❌ Listo, no cambio nada.")
-        return
-
-    result = await actions.apply_edit(current, user_id)
-    pending.clear(chat_id)
-    await query.answer("Hecho")
-    await message.edit_text(result)
+    action = "confirm" if callback_data.action == "confirm" else "reject"
+    await _resume(
+        query,
+        bot,
+        runner,
+        {"action": action, "edit_id": callback_data.edit_id},
+        "Hecho" if action == "confirm" else "Cancelado",
+    )
 
 
 @router.callback_query(CandidateCallback.filter())
 async def on_candidate_chosen(
-    query: CallbackQuery,
-    callback_data: CandidateCallback,
-    pending: PendingStore,
+    query: CallbackQuery, callback_data: CandidateCallback, bot: Bot, runner: GraphRunner
 ) -> None:
     """Elección entre varias entradas candidatas a borrar."""
-    message = query.message
-    if not isinstance(message, Message):
-        await query.answer("Este mensaje ya no está disponible.")
-        return
-    chat_id = message.chat.id
-    current = pending.get(chat_id)
-    if not isinstance(current, PendingEdit) or current.edit_id != callback_data.edit_id:
-        await query.answer("Esto ya no está activo.")
-        await message.edit_reply_markup(reply_markup=None)
-        return
-
-    result = await actions.remove_chosen(callback_data.entry_id, query.from_user.id)
-    pending.clear(chat_id)
-    await query.answer("Hecho")
-    await message.edit_text(result)
+    await _resume(
+        query,
+        bot,
+        runner,
+        {"action": "confirm", "entry_id": callback_data.entry_id},
+        "Hecho",
+    )

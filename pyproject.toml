@@ -18,6 +18,8 @@ dependencies = [
     "anthropic>=1.3,<2",
     "openai>=3.7,<4",
     "holidays>=0.60,<1",
+    "langgraph>=0.6",
+    "langgraph-checkpoint-postgres>=2.0",
 ]
 
 [project.optional-dependencies]

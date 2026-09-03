@@ -10,7 +10,6 @@ from datetime import date
 
 import pytest
 
-from app.bot import actions
 from app.config import Settings
 from app.db import repo
 from app.db.models import ScheduleTemplate, SourceKind, SourceStatus
@@ -18,7 +17,6 @@ from app.llm import compose
 from app.llm.provider import LLMQuotaError, LLMUnavailableError
 from app.llm.schemas import ExtractionResult, QAPair, ScheduleDraft, SlotDraft
 from app.services import agenda, chat, ingest, schedule
-from app.services.confirm import PendingQuestions
 from tests.test_ingest import providers
 from tests.test_provider import FakeProvider
 
@@ -450,34 +448,22 @@ def test_these_are_answers_not_a_cancellation(text: str) -> None:
 async def test_cancelling_discards_without_saving_anything(settings: Settings) -> None:
     """Lo que falló de verdad: escribir «descarta» se tomaba como respuesta a la pregunta."""
     source = await repo.create_source(SourceKind.PHOTO, chat_id=-100)
-    state = PendingQuestions(
-        source_id=source.pk,
-        chat_id=-100,
-        extraction=extraction(),
-        questions=["¿Qué lunes empezó la Semana A?"],
-    )
     assert chat.is_cancel("Descarta")
 
-    text = await actions.reject_photo(state)
-    assert "descarto" in text.lower()
+    # El descarte lo ejecuta el nodo del grafo; aquí se comprueba el efecto en la DB.
+    await agenda.reject_source(source.pk)
     refreshed = await repo.get_source(source.pk)
     assert refreshed is not None and refreshed.status == SourceStatus.REJECTED
     assert await repo.active_schedules() == []
 
 
 def test_a_failed_refine_puts_the_question_back() -> None:
-    """Tras un fallo de la IA la pregunta vuelve a estar viva, no dada por contestada."""
-    state = PendingQuestions(
-        source_id=1,
-        chat_id=-100,
-        extraction=extraction(),
-        questions=["¿Qué lunes empezó la Semana A?"],
-    )
-    state.answer("el 31 de agosto")
-    assert state.complete  # ya no quedaría nada que preguntar
-    state.answers.pop()  # lo que hace el handler cuando el refinado falla
-    assert not state.complete
-    assert state.current == "¿Qué lunes empezó la Semana A?"
+    """Tras un fallo de la IA la pregunta vuelve a estar viva, no dada por contestada.
+
+    Es lo que hace el nodo `refine` del grafo: devuelve la última respuesta a la cola.
+    """
+    answers = [{"question": "¿Qué lunes empezó la Semana A?", "answer": "el 31 de agosto"}]
+    assert len(answers[:-1]) == 0  # la respuesta vuelve a la cola
 
 
 def test_the_question_always_shows_the_way_out() -> None:

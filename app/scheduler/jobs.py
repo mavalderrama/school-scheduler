@@ -24,10 +24,10 @@ from django.utils import timezone
 
 from app.config import Settings
 from app.db import repo
+from app.graph.runner import GraphRunner
 from app.llm.provider import LLMProviders
 from app.log import get_logger
 from app.services import notify
-from app.services.confirm import PendingStore
 
 log = get_logger(__name__)
 
@@ -77,7 +77,7 @@ async def gap_check_job(bot: Bot, settings: Settings) -> None:
 
 @db_job
 async def retry_photos_job(
-    bot: Bot, settings: Settings, providers: LLMProviders, pending: PendingStore
+    bot: Bot, settings: Settings, providers: LLMProviders, runner: GraphRunner
 ) -> None:
     """Reintenta las fotos que quedaron sin leer (cuota agotada) y abandona las muy viejas.
 
@@ -104,7 +104,7 @@ async def retry_photos_job(
 
     done = 0
     for source in stale:
-        if await actions.resume_photo(bot, source, settings, providers, pending):
+        if await actions.resume_photo(bot, source, runner):
             done += 1
     log.info("retry_photos_done", candidates=len(stale), recovered=done)
 
@@ -146,7 +146,7 @@ def register_jobs(
     settings: Settings,
     bot: Bot,
     providers: LLMProviders,
-    pending: PendingStore,
+    runner: GraphRunner,
 ) -> None:
     tz = settings.zoneinfo
     daily_h, daily_m = _hhmm(settings.daily_notify_time)
@@ -172,7 +172,7 @@ def register_jobs(
     scheduler.add_job(
         retry_photos_job,
         IntervalTrigger(minutes=max(settings.llm_retry_after_min, 5), timezone=tz),
-        args=[bot, settings, providers, pending],
+        args=[bot, settings, providers, runner],
         id="retry_photos",
         replace_existing=True,
         misfire_grace_time=MISFIRE_GRACE_S,

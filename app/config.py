@@ -137,6 +137,8 @@ class Settings(DjangoSettings):
     # Traza de las llamadas al LLM: prompt y respuesta cruda en `llm_calls`.
     llm_trace_enabled: bool = True
     llm_trace_retention_days: int = 30
+    # Caducidad de una conversación a medias guardada en el grafo.
+    graph_state_ttl_hours: int = 24
     # OpenTelemetry: apagado por defecto. Langfuse ingiere OTLP, así que apuntarlo allí es
     # solo poner el endpoint. Las dependencias van en el extra `otel`.
     otel_enabled: bool = False
@@ -267,6 +269,16 @@ def startup_warnings(settings: Settings) -> list[str]:
     if settings.admin_enabled and settings.django_debug:
         warnings.append("DJANGO_DEBUG=true: el admin muestra trazas completas; solo para depurar.")
     return warnings
+
+
+def _silence_langsmith() -> None:
+    """`langsmith` llega como dependencia de langgraph aunque no se use.
+
+    Se apaga explícitamente: la observabilidad de este proyecto es `llm_calls` y, si acaso,
+    OTLP; no queremos que nada salga a un servicio de terceros por defecto.
+    """
+    os.environ.setdefault("LANGSMITH_TRACING", "false")
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 
 
 def harden_environment(settings: Settings) -> None:
