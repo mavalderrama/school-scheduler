@@ -143,6 +143,10 @@ class Settings(DjangoSettings):
     # solo poner el endpoint. Las dependencias van en el extra `otel`.
     otel_enabled: bool = False
     otel_service_name: str = "agenda-escolar-bot"
+    # Home Assistant (Fase 5, opcional): segunda vía si Telegram falla.
+    ha_url: str | None = None
+    ha_token: str | None = None
+    ha_notify_service: str | None = None
     retry_give_up_hours: int = 24
 
     # --- Ollama ---
@@ -183,6 +187,26 @@ class Settings(DjangoSettings):
         if not _HHMM.match(value):
             raise ValueError(f"hora inválida {value!r}; usar formato HH:MM")
         return value
+
+    @field_validator("school_country")
+    @classmethod
+    def _check_country(cls, value: str) -> str:
+        """Un país que `holidays` no conoce daría «sin festivos» en silencio.
+
+        Y sin festivos el bot anunciaría clase el 12 de octubre, que es justo el fallo que
+        nadie mira hasta que pasa. Mejor no arrancar.
+        """
+        import holidays
+
+        code = value.strip().upper()
+        try:
+            holidays.country_holidays(code, years=[date.today().year])
+        except NotImplementedError as exc:
+            raise ValueError(
+                f"país desconocido para los festivos: {value!r}. Usa un código ISO de dos "
+                "letras que soporte la librería `holidays` (p. ej. CO)."
+            ) from exc
+        return code
 
     @model_validator(mode="after")
     def _check_providers(self) -> Settings:

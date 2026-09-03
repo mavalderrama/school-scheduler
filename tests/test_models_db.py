@@ -132,7 +132,6 @@ async def test_connection_helpers_are_callable_from_the_loop() -> None:
 
 async def test_schedule_tables_and_constraints_exist() -> None:
     schedules = await repo.table_constraints("schedules")
-    assert "schedules_holiday_policy_check" in schedules
     assert "schedules_cycle_check" in schedules
 
     slots = await repo.table_constraints("schedule_slots")

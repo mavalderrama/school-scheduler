@@ -47,12 +47,20 @@ async def seed(*entries: tuple[date, str, str]) -> None:
 # --- Puro --------------------------------------------------------------------------------
 
 
-def test_daily_target_skips_weekend() -> None:
-    assert notify.daily_target(MON, skip_weekend=True) == TUE
-    assert notify.daily_target(FRI, skip_weekend=True) is None  # mañana sábado
-    assert notify.daily_target(SAT, skip_weekend=True) is None  # mañana domingo
-    assert notify.daily_target(SUN, skip_weekend=True) == date(2026, 9, 14)
-    assert notify.daily_target(FRI, skip_weekend=False) == SAT
+def test_daily_target_only_points_at_school_days() -> None:
+    """Mañana, pero solo si mañana hay colegio."""
+
+    def target(day: date, *, skip_non_school: bool = True) -> date | None:
+        return notify.daily_target(day, exceptions={}, skip_non_school=skip_non_school)
+
+    assert target(MON) == TUE
+    assert target(FRI) is None  # mañana sábado
+    assert target(SAT) is None  # mañana domingo
+    assert target(SUN) == date(2026, 9, 14)
+    assert target(FRI, skip_non_school=False) == SAT
+    # Y ahora también los festivos: el domingo 11 apunta al lunes 12, que es festivo.
+    assert target(date(2026, 10, 11)) is None
+    assert target(date(2026, 10, 12)) == date(2026, 10, 13)  # el festivo avisa del martes
 
 
 def test_next_week_days() -> None:
@@ -223,16 +231,6 @@ async def test_the_class_comes_before_the_agenda_entries(settings: Settings) -> 
     assert text.index("Motricidad") < text.index("sudadera")
 
 
-async def test_a_holiday_is_announced_instead_of_asking_for_a_photo(settings: Settings) -> None:
-    """El 12 de octubre de 2026 es lunes festivo: mejor decirlo que pedir una foto."""
-    await seed_schedule()
-    send = FakeSender()
-    await notify.send_daily(send, settings, date(2026, 10, 11))  # domingo -> mañana lunes 12
-
-    text = send.sent[0][1]
-    assert "sin clase" in text and "Día de la Raza" in text
-
-
 async def test_without_a_schedule_the_nudge_still_works(settings: Settings) -> None:
     """Sin horario cargado no se inventa nada: sigue el aviso de agenda vacía."""
     send = FakeSender()
@@ -294,3 +292,80 @@ async def test_with_one_schedule_the_name_is_not_repeated(settings: Settings) ->
     send = FakeSender()
     await notify.send_daily(send, settings, MON)
     assert "Horario K4A" not in send.sent[0][1]
+
+
+# --- La notificación sigue el calendario escolar --------------------------------------------
+#
+# Regla: se avisa del **próximo día de clase**, la tarde anterior. Antes solo se saltaban los
+# fines de semana, así que la víspera de un festivo salía un aviso de un día sin colegio.
+
+RAZA = date(2026, 10, 12)  # lunes festivo: Día de la Raza
+SUNDAY_BEFORE = date(2026, 10, 11)
+TUESDAY_AFTER = date(2026, 10, 13)
+
+
+async def test_the_eve_of_a_holiday_is_silent(settings: Settings) -> None:
+    """Domingo por la noche, con el lunes festivo: no se manda nada."""
+    await seed_schedule()
+    send = FakeSender()
+    outcomes = await notify.send_daily(send, settings, SUNDAY_BEFORE)
+    assert outcomes == []
+    assert send.sent == []
+
+
+async def test_on_the_holiday_it_announces_the_next_school_day(settings: Settings) -> None:
+    """El lunes festivo por la noche sí se avisa, y del **martes**."""
+    await seed_schedule()
+    send = FakeSender()
+    outcomes = await notify.send_daily(send, settings, RAZA)
+
+    assert [o.kind for o in outcomes] == [NotificationKind.DAILY]
+    assert "martes 13 de octubre" in send.sent[0][1]
+
+
+async def test_a_recess_week_stays_quiet(settings: Settings) -> None:
+    """Con la semana de receso cargada en el admin, no suena en toda la semana."""
+    from app.db.models import CalendarKind
+
+    await seed_schedule()
+    week = [date(2026, 10, 19) + timedelta(days=i) for i in range(5)]
+    for day in week:
+        await repo.add_calendar_exception(day, CalendarKind.SCHOOL_CLOSED, "Semana de receso")
+
+    send = FakeSender()
+    # Las tardes del domingo al jueves: todas apuntan a un día sin colegio.
+    for evening in [date(2026, 10, 18), *week[:-1]]:
+        assert await notify.send_daily(send, settings, evening) == []
+    assert send.sent == []
+
+
+async def test_a_normal_weekday_is_unchanged(settings: Settings) -> None:
+    """Regresión: un lunes cualquiera sigue avisando del martes, como siempre."""
+    await seed_schedule()
+    send = FakeSender()
+    outcomes = await notify.send_daily(send, settings, MON)
+    assert [o.kind for o in outcomes] == [NotificationKind.DAILY]
+    assert "martes 8 de septiembre" in send.sent[0][1]
+
+
+async def test_gap_check_ignores_holidays(settings: Settings) -> None:
+    """Un lunes festivo de la semana que viene no es un hueco que reclamar."""
+    send = FakeSender()
+    # Domingo 4 de octubre: la semana siguiente empieza el lunes 12, que es festivo.
+    await notify.send_gap_check(send, settings, date(2026, 10, 11))
+    assert send.sent, "debería reclamar los días lectivos que sí faltan"
+    text = send.sent[0][1]
+    assert "lunes 12" not in text
+    assert "martes 13" in text
+
+
+async def test_gap_check_says_nothing_when_the_whole_week_is_off(settings: Settings) -> None:
+    from app.db.models import CalendarKind
+
+    for i in range(5):
+        await repo.add_calendar_exception(
+            date(2026, 10, 19) + timedelta(days=i), CalendarKind.SCHOOL_CLOSED, "Receso"
+        )
+    send = FakeSender()
+    assert await notify.send_gap_check(send, settings, date(2026, 10, 18)) == []
+    assert send.sent == []

@@ -10,7 +10,7 @@ from datetime import date
 
 import pytest
 
-from app.db.models import CalendarKind, HolidayPolicy, ScheduleSlot, ScheduleTemplate
+from app.db.models import CalendarKind, ScheduleSlot, ScheduleTemplate
 from app.services import schedule
 
 # Lunes ancla de la Semana A: el usuario dijo que la Semana A empezó el martes 2026-09-01.
@@ -37,7 +37,6 @@ def make_template(**overrides: object) -> ScheduleTemplate:
         "cycle_weeks": 2,
         "valid_from": ANCHOR,
         "valid_to": None,
-        "holiday_policy": HolidayPolicy.SKIP_DAY,
     }
     values.update(overrides)
     return ScheduleTemplate(**values)

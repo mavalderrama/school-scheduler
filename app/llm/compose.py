@@ -41,9 +41,15 @@ KIND_LABELS: dict[str, tuple[str, str]] = {
 CONFIDENCE_MARK = {"high": "", "medium": " ❔", "low": " ❓"}
 
 
-def format_date_es(day: date) -> str:
-    """'martes 2 de septiembre' (con año solo si no es el actual no se decide aquí)."""
-    return f"{weekday_es(day)} {day.day} de {MONTHS_ES[day.month - 1]}"
+def format_date_es(day: date, *, with_year: bool = False) -> str:
+    """'martes 2 de septiembre', o con año si se pide.
+
+    El año se omite por defecto porque casi todo lo que dice el bot es de esta semana. Pero
+    donde la fecha está lejos —el vencimiento del token, que es a un año— omitirlo se lee
+    como «caduca hoy», así que ahí se pide explícitamente.
+    """
+    text = f"{weekday_es(day)} {day.day} de {MONTHS_ES[day.month - 1]}"
+    return f"{text} de {day.year}" if with_year else text
 
 
 def _entry_line(entry: ExtractedEntry) -> str:

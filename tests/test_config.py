@@ -137,3 +137,17 @@ def test_env_example_parses_to_usable_values() -> None:
             continue
         name, _, value = line.partition("=")
         assert not value.strip().startswith("#"), f"{name} tomaría un comentario como valor"
+
+
+def test_an_unknown_country_fails_at_startup() -> None:
+    """Un país que `holidays` no conoce daría «sin festivos» en silencio.
+
+    Y sin festivos el bot anunciaría clase el 12 de octubre, que es el fallo que nadie mira
+    hasta que pasa.
+    """
+    with pytest.raises(ValidationError, match="país desconocido"):
+        make_settings(school_country="ZZ")
+
+
+def test_the_country_is_normalised() -> None:
+    assert make_settings(school_country="co").school_country == "CO"

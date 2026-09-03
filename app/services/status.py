@@ -34,7 +34,10 @@ def _token_line(settings: Settings, today: date) -> str | None:
     expires = issued + timedelta(days=TOKEN_LIFETIME_DAYS)
     left = (expires - today).days
     mark = "⚠️" if left <= TOKEN_WARN_DAYS else "🔑"
-    return f"{mark} Token de suscripción: caduca el {format_date_es(expires)} ({left} días)."
+    return (
+        f"{mark} Token de suscripción: caduca el "
+        f"{format_date_es(expires, with_year=True)} ({left} días)."
+    )
 
 
 def _usage_lines(rows: list[dict[str, Any]]) -> list[str]:

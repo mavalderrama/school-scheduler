@@ -9,6 +9,7 @@ el unique parcial `notif_log_ok_unique`.
 from __future__ import annotations
 
 import html
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -19,6 +20,7 @@ from app.db.models import AgendaEntry, NotificationKind
 from app.llm.compose import KIND_LABELS, format_date_es, slot_lines
 from app.llm.prompting import weekday_es
 from app.log import get_logger
+from app.services import ha, schoolcal
 from app.services import schedule as schedule_service
 from app.services.schedule import SlotResult
 
@@ -43,10 +45,24 @@ class Outcome:
 # --- Fechas ----------------------------------------------------------------------------
 
 
-def daily_target(today: date, skip_weekend: bool) -> date | None:
-    """Mañana, o None si cae en fin de semana y SKIP_WEEKEND está activo."""
+def daily_target(
+    today: date,
+    *,
+    exceptions: dict[date, tuple[str, str]],
+    country: str = "CO",
+    skip_non_school: bool = True,
+) -> date | None:
+    """Mañana, **solo si mañana hay colegio**. Si no, None y esta tarde no se avisa nada.
+
+    La notificación recuerda el próximo día de clase la tarde anterior. Antes solo saltaba
+    los fines de semana, así que la víspera de un festivo mandaba el aviso de un día en el
+    que no hay colegio. El caso «lunes festivo → se avisa el lunes por la noche, del martes»
+    sale solo de esta regla, sin lógica extra: esa tarde, mañana sí es lectivo.
+    """
     target = today + timedelta(days=1)
-    if skip_weekend and target.weekday() >= 5:
+    if skip_non_school and not schoolcal.is_school_day(
+        target, exceptions=exceptions, country=country
+    ):
         return None
     return target
 
@@ -55,6 +71,20 @@ def next_week_days(today: date) -> list[date]:
     """Lunes a viernes de la semana siguiente a la de `today`."""
     next_monday = today + timedelta(days=7 - today.weekday())
     return [next_monday + timedelta(days=i) for i in range(5)]
+
+
+def next_week_school_days(
+    today: date, *, exceptions: dict[date, tuple[str, str]], country: str = "CO"
+) -> list[date]:
+    """Los días de la semana que viene en los que **sí** hay colegio.
+
+    Reclamar la agenda de un festivo es ruido: si el lunes no hay clase, no es un hueco.
+    """
+    return [
+        day
+        for day in next_week_days(today)
+        if schoolcal.is_school_day(day, exceptions=exceptions, country=country)
+    ]
 
 
 # --- Textos ------------------------------------------------------------------------------
@@ -72,6 +102,11 @@ def format_daily(
             emoji, label = KIND_LABELS[kind]
             lines.append(f"{emoji} {label}: {', '.join(texts)}")
     return "\n".join(lines)
+
+
+def _plain(text: str) -> str:
+    """El HTML de Telegram no sirve en una notificación de Home Assistant."""
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
 def format_nudge(target: date) -> str:
@@ -106,6 +141,7 @@ async def _send_to_chats(
     idempotency_kinds: Sequence[NotificationKind],
     target: date,
     text: str,
+    settings: Settings | None = None,
 ) -> list[Outcome]:
     outcomes: list[Outcome] = []
     for chat_id in chat_ids:
@@ -119,6 +155,12 @@ async def _send_to_chats(
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             log.exception("notify_failed", kind=kind, chat_id=chat_id)
+            # Plan B: si Telegram no responde, se intenta por Home Assistant. El resultado
+            # se anota junto al error para que `/estado` no diga que el aviso no llegó
+            # cuando sí llegó por la otra vía.
+            if settings is not None and ha.configured(settings):
+                relayed = await ha.notify(settings, _plain(text))
+                error += " | HA: enviado" if relayed else " | HA: también falló"
         await repo.log_notification(kind, target, chat_id, ok=error is None, error=error)
         log.info(
             "notify_sent", kind=kind, target=target.isoformat(), chat_id=chat_id, ok=error is None
@@ -129,9 +171,18 @@ async def _send_to_chats(
 
 async def send_daily(send: Sender, settings: Settings, today: date) -> list[Outcome]:
     """Notificación de las 19:00: lo de mañana, o el aviso de agenda vacía."""
-    target = daily_target(today, settings.skip_weekend)
+    exceptions = await repo.calendar_exceptions()
+    target = daily_target(
+        today,
+        exceptions=exceptions,
+        country=settings.school_country,
+        skip_non_school=settings.skip_weekend,
+    )
     if target is None:
-        log.info("notify_weekend_skip", today=today.isoformat())
+        info = schoolcal.day_info(
+            today + timedelta(days=1), exceptions=exceptions, country=settings.school_country
+        )
+        log.info("notify_skip_non_school_day", today=today.isoformat(), reason=info.reason)
         return []
     kind, text = await build_daily_message(
         target, country=settings.school_country, use_schedule=settings.schedule_enabled
@@ -143,22 +194,29 @@ async def send_daily(send: Sender, settings: Settings, today: date) -> list[Outc
         idempotency_kinds=DAILY_KINDS,
         target=target,
         text=text,
+        settings=settings,
     )
 
 
 async def send_gap_check(send: Sender, settings: Settings, today: date) -> list[Outcome]:
     """Domingo: días hábiles de la próxima semana sin entradas vigentes."""
-    days = next_week_days(today)
+    week = next_week_days(today)
+    exceptions = await repo.calendar_exceptions()
+    days = next_week_school_days(today, exceptions=exceptions, country=settings.school_country)
+    if not days:
+        log.info("gap_check_no_school_week", week_of=week[0].isoformat())
+        return []
     covered = await repo.active_dates(days[0], days[-1])
     gaps = [d for d in days if d not in covered]
     if not gaps:
-        log.info("gap_check_clean", week_of=days[0].isoformat())
+        log.info("gap_check_clean", week_of=week[0].isoformat())
         return []
     return await _send_to_chats(
         send,
         settings.notify_chat_ids,
         kind=NotificationKind.GAP_CHECK,
         idempotency_kinds=(NotificationKind.GAP_CHECK,),
-        target=days[0],
+        target=week[0],
         text=format_gaps(gaps),
+        settings=settings,
     )

@@ -14,7 +14,7 @@ from app.db import repo
 from app.graph.runner import GraphRunner
 from app.llm import compose
 from app.llm.provider import LLMProviders
-from app.services import chat, notify, status
+from app.services import chat, notify, schoolcal, status
 from app.services import schedule as schedule_service
 
 router = Router(name="commands")
@@ -58,8 +58,23 @@ async def cmd_hoy(message: Message, settings: Settings) -> None:
 async def cmd_manana(message: Message, settings: Settings) -> None:
     """Lo de mañana, con el mismo formato que la notificación de las 19:00 (sin registrarla)."""
     tomorrow = datetime.now(settings.zoneinfo).date() + timedelta(days=1)
-    if settings.skip_weekend and tomorrow.weekday() >= 5:
-        await message.answer(f"Mañana es {compose.format_date_es(tomorrow)}: no hay colegio. 🎉")
+    exceptions = await repo.calendar_exceptions()
+    info = schoolcal.day_info(tomorrow, exceptions=exceptions, country=settings.school_country)
+    if settings.skip_weekend and not info.is_school_day:
+        # Decir por qué y cuándo se vuelve: «no hay colegio» a secas deja al usuario
+        # preguntándose si el bot se ha enterado del festivo o simplemente falla.
+        nxt = schoolcal.next_school_day(
+            tomorrow, exceptions=exceptions, country=settings.school_country
+        )
+        motivo = f" ({info.reason})" if info.reason else ""
+        cuando = (
+            f" El próximo día de clase es el {compose.format_date_es(nxt)}."
+            if nxt is not None
+            else ""
+        )
+        await message.answer(
+            f"Mañana es {compose.format_date_es(tomorrow)}: no hay colegio{motivo}.{cuando} 🎉"
+        )
         return
     _, text = await notify.build_daily_message(
         tomorrow,

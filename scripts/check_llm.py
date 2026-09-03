@@ -4,7 +4,6 @@ Para cada proveedor referenciado en la config (principal o fallback, visión o t
 1. `healthcheck()`: para claude_sdk es una llamada real (token + subproceso + JSON);
    para ollama y anthropic_api comprueba conexión y que el modelo existe.
 2. Una llamada mínima de texto y otra de visión sobre `tests/fixtures/agenda_sample.jpg`.
-   Mientras esos métodos sean stubs (Fase 1 y 3) se reporta como pendiente.
 
 Uso: `python scripts/check_llm.py` (o `make check-llm` dentro del contenedor).
 Sale con código 1 si algún healthcheck falla.
@@ -38,8 +37,6 @@ def _mark(ok: bool) -> str:
 async def _probe_text(provider: LLMProvider, today: datetime) -> str:
     try:
         intent = await provider.classify_intent("responde ok", [], today.date(), False)
-    except NotImplementedError as exc:
-        return f"pendiente ({exc})"
     except LLMError as exc:
         return f"FALLA: {exc}"
     return f"OK action={intent.action}"
@@ -50,8 +47,6 @@ async def _probe_vision(provider: LLMProvider, today: datetime) -> str:
         return f"sin fixture {FIXTURE}"
     try:
         result = await provider.extract_from_image(FIXTURE, today.date())
-    except NotImplementedError as exc:
-        return f"pendiente ({exc})"
     except LLMError as exc:
         return f"FALLA: {exc}"
     return f"OK entries={len(result.entries)} doubts={len(result.doubts)}"

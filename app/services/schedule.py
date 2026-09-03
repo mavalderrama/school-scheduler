@@ -1,9 +1,8 @@
 """Horario rotativo A/B: qué materia toca cada día. Determinista, sin LLM.
 
 La aritmética es toda la fase: la semana del ciclo sale de contar semanas completas desde
-un lunes ancla. Con la política `skip_day` (la de este colegio) un festivo **no desplaza el
-ciclo**: la semana sigue siendo la que le toca por calendario y esa rotación simplemente no
-se dicta esa vuelta.
+un lunes ancla. Un festivo **no desplaza el ciclo**: la semana sigue siendo la que le toca por
+calendario y esa rotación simplemente no se dicta esa vuelta.
 
 Comprobado contra el horario K4A: ancla lunes 2026-08-31, ciclo de 2 semanas; el miércoles
 2026-09-02 es Semana A (Deporte 1) y el jueves 2026-09-10 es Semana B (Natación).
@@ -16,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from app.db import repo
-from app.db.models import HolidayPolicy, ScheduleSlot, ScheduleTemplate
+from app.db.models import ScheduleSlot, ScheduleTemplate
 from app.services import schoolcal
 
 MAX_HORIZON_DAYS = 400
@@ -77,11 +76,8 @@ def slot_for(
     label = _label_for(index, slots) if template.cycle_weeks > 1 else None
 
     if not info.is_school_day:
-        # `skip_day`: la etiqueta de la semana no se toca, solo se pierde esa rotación.
+        # La etiqueta de la semana no se toca: solo se pierde la franja de ese día.
         return SlotResult(day, week_label=label, skipped_reason=info.reason, schedule_name=name)
-
-    if template.holiday_policy == HolidayPolicy.SHIFT:  # pragma: no cover - no usado aún
-        raise NotImplementedError("la política 'shift' todavía no está implementada")
 
     match = next(
         (s for s in slots if s.week_index == index and s.weekday == day.isoweekday()), None

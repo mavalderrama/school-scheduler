@@ -228,3 +228,13 @@ async def test_source_kind_is_recorded_for_text_corrections() -> None:
     source = await repo.create_source(SourceKind.TEXT_CORRECTION, chat_id=CHAT)
     assert source.chat_id == CHAT
     assert source.kind == SourceKind.TEXT_CORRECTION
+
+
+async def test_the_token_warning_says_which_year(settings: Settings) -> None:
+    """Sin el año, «caduca el jueves 2 de septiembre» se lee como «caduca hoy»."""
+    issued = date(2026, 9, 2)
+    report = await status.build_status(
+        settings.model_copy(update={"claude_token_issued_at": issued}),
+        providers(FakeProvider("claude_sdk")),
+    )
+    assert "de 2027" in report

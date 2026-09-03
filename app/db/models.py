@@ -54,13 +54,6 @@ class LLMTask(models.TextChoices):
     REFINE = "refine", "Refinado con respuestas"
 
 
-class HolidayPolicy(models.TextChoices):
-    """Qué le hace un día no lectivo a la rotación."""
-
-    SKIP_DAY = "skip_day", "Solo se cancela ese día"
-    SHIFT = "shift", "La rotación se corre"
-
-
 class CalendarKind(models.TextChoices):
     """Excepciones del calendario que la librería de festivos no puede saber."""
 
@@ -312,6 +305,11 @@ class ScheduleTemplate(models.Model):
 
     Se versiona como todo lo demás: una foto nueva del horario desactiva la plantilla
     anterior con `superseded_by` en vez de editarla.
+
+    Un día no lectivo **nunca** mueve la rotación: solo se pierde la franja de ese día y la
+    semana sigue siendo la que le toca por calendario. Hubo un campo `holiday_policy` para
+    configurarlo; se quitó porque la otra opción no existía y, al ser elegible desde el
+    admin, tumbaba la notificación diaria.
     """
 
     name = models.TextField(verbose_name="nombre")
@@ -324,12 +322,6 @@ class ScheduleTemplate(models.Model):
     )
     valid_from = models.DateField(verbose_name="vigente desde")
     valid_to = models.DateField(null=True, blank=True, verbose_name="vigente hasta")
-    holiday_policy = models.TextField(
-        choices=HolidayPolicy,
-        default=HolidayPolicy.SKIP_DAY,
-        db_default=HolidayPolicy.SKIP_DAY,
-        verbose_name="política de festivos",
-    )
     source = models.ForeignKey(
         Source,
         on_delete=models.PROTECT,
@@ -354,10 +346,6 @@ class ScheduleTemplate(models.Model):
         verbose_name = "horario"
         verbose_name_plural = "horarios"
         constraints = [
-            models.CheckConstraint(
-                condition=Q(holiday_policy__in=HolidayPolicy.values),
-                name="schedules_holiday_policy_check",
-            ),
             models.CheckConstraint(condition=Q(cycle_weeks__gte=1), name="schedules_cycle_check"),
             # Un horario cerrado antes de empezar es una fila incoherente: pasó de verdad
             # al reemplazar el mismo día en que se había creado el anterior.
@@ -439,3 +427,27 @@ class CalendarException(models.Model):
 
     def __str__(self) -> str:
         return f"{self.day} {self.kind}: {self.label}"
+
+
+class GraphThread(models.Model):
+    """Vista de solo lectura sobre los checkpoints de LangGraph, para el admin.
+
+    `managed = False`: la tabla la crea `AsyncPostgresSaver.setup()` en cada arranque, no
+    las migraciones de Django. No se exponen los valores del estado porque son msgpack
+    binario en `checkpoint_blobs`; aquí solo interesa qué chat tiene una conversación viva
+    y desde cuándo, que es lo que responde `/pendiente` pero de todos los chats a la vez.
+    """
+
+    thread_id = models.TextField(primary_key=True, verbose_name="chat")
+    checkpoint_id = models.TextField(verbose_name="checkpoint")
+    checkpoint = models.JSONField(verbose_name="estado interno")
+    metadata = models.JSONField(verbose_name="metadatos")
+
+    class Meta:
+        managed = False
+        db_table = "checkpoints"
+        verbose_name = "conversación en curso"
+        verbose_name_plural = "conversaciones en curso"
+
+    def __str__(self) -> str:
+        return self.thread_id

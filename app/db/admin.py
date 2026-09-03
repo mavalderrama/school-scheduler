@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 from django.contrib import admin
+from django.db.models import Max, QuerySet
 from django.http import HttpRequest
 from django.utils.html import format_html
 
@@ -16,6 +17,7 @@ from app.db.models import (
     AgendaEntry,
     CalendarException,
     ConversationMessage,
+    GraphThread,
     LLMCacheEntry,
     LLMCall,
     NotificationLog,
@@ -227,3 +229,41 @@ class CalendarExceptionAdmin(NoDeleteMixin, admin.ModelAdmin[CalendarException])
     list_filter = ["kind"]
     ordering = ["-day"]
     search_fields = ["label"]
+
+
+@admin.register(GraphThread)
+class GraphThreadAdmin(ReadOnlyMixin, admin.ModelAdmin[GraphThread]):
+    """Conversaciones a medias: qué chat está esperando algo y desde cuándo.
+
+    Antes esto vivía en un `dict` en memoria y no se podía mirar desde ningún sitio; ahora
+    está en Postgres y se puede, aunque el contenido del estado siga siendo binario.
+    """
+
+    list_display = ["chat", "esperando", "actualizado"]
+    ordering = ["thread_id"]
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[GraphThread]:
+        # Un hilo tiene muchos checkpoints; solo interesa el último de cada uno.
+        latest = (
+            GraphThread.objects.values("thread_id")
+            .annotate(last=Max("checkpoint_id"))
+            .values("last")
+        )
+        return GraphThread.objects.filter(checkpoint_id__in=latest)
+
+    @admin.display(description="chat")
+    def chat(self, obj: GraphThread) -> str:
+        return obj.thread_id.removeprefix("chat:")
+
+    @admin.display(description="esperando")
+    def esperando(self, obj: GraphThread) -> str:
+        """Los nodos pendientes del checkpoint; vacío = la conversación terminó."""
+        pending = (obj.checkpoint or {}).get("versions_seen", {}).get("__interrupt__")
+        if not pending:
+            return "— (terminada)"
+        nodes = [k for k in pending if not k.startswith("__") and not k.startswith("branch:")]
+        return ", ".join(nodes) or "respuesta del usuario"
+
+    @admin.display(description="actualizado")
+    def actualizado(self, obj: GraphThread) -> str:
+        return str((obj.checkpoint or {}).get("ts", "—"))

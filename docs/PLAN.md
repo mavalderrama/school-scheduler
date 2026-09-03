@@ -204,7 +204,9 @@ agenda-escolar-bot/
 │   │   └── prompts/         # .md, uno por prompt, compartidos entre proveedores
 │   ├── services/
 │   │   ├── agenda.py        # lógica de negocio: merge, vigencia, consultas
-│   │   ├── confirm.py       # ciclo de confirmación
+│   │   ├── schedule.py      # horario rotativo A/B (determinista)
+│   │   ├── schoolcal.py     # festivos y días sin clase
+│   │   ├── ha.py            # aviso por Home Assistant si Telegram falla
 │   │   └── notify.py        # arma y envía notificaciones
 │   ├── bot/
 │   │   ├── handlers/{photo,text,callbacks,commands}.py
@@ -442,7 +444,7 @@ Recibe las entradas ya consultadas de la DB y produce un texto corto en español
 - `remove_entry`: buscar candidatos activos en la fecha o con `target_entry_hint` por `ILIKE`; si hay más de uno, botones para elegir.
 
 ### 7.3 Notificación diaria (19:00 America/Bogota)
-1. `target = hoy + 1`. Si `target` es sábado o domingo, no enviar (`SKIP_WEEKEND=true`).
+1. `target = hoy + 1`. **Si `target` no es día lectivo** —fin de semana, festivo nacional o día sin colegio cargado en `calendar_exceptions`— no se envía nada esa tarde (`SKIP_WEEKEND=true`). La notificación recuerda el próximo día de clase la tarde anterior: si el lunes es festivo, el domingo no suena y el aviso sale el lunes por la noche, sobre el martes.
 2. Consultar entradas activas de `target`.
 3. Si hay: enviar a `NOTIFY_CHAT_IDS`:
    ```
@@ -552,7 +554,7 @@ Validación en arranque (`config.py`): fallar con mensaje claro si un proveedor 
 - **Acepta cuando:** `make dev` levanta todo, `/ping` responde "pong" en el grupo, `check_llm.py` pasa para los proveedores configurados, y un usuario fuera de la whitelist no recibe respuesta.
 
 ### Fase 1 — Ingesta de fotos + confirmación
-- Handler de foto, descarga, `extract_from_image()` en los proveedores configurados (principal y fallback), resumen + inline keyboard, `services/confirm.py`, `services/agenda.apply_source()` con merge por fecha en transacción, registro en `llm_calls`.
+- Handler de foto, descarga, `extract_from_image()` en los proveedores configurados (principal y fallback), resumen + inline keyboard, `services/agenda.apply_source()` con merge por fecha en transacción, registro en `llm_calls`.
 - Tests: unitarios de merge (fecha nueva, fecha existente, dos fotos seguidas, rechazo); test del handler con el proveedor mockeado; test de la cadena de fallback (principal falla → fallback responde).
 - **Acepta cuando:** mando una foto real, veo el resumen con dudas, confirmo, y `agenda_entries` refleja exactamente lo confirmado. Una segunda foto de la misma fecha reemplaza la primera con `superseded_by` correcto. Apagando el proveedor principal, la foto se procesa con el fallback y `sources.llm_provider` lo refleja.
 
@@ -578,8 +580,12 @@ Validación en arranque (`config.py`): fallar con mensaje claro si un proveedor 
 - La clase del día entra en la notificación diaria, `/hoy`, `/manana`, `/semana` y `/estado`. Comando nuevo `/horario` e intención nueva `query_subject` («¿cuándo hay natación?»).
 - **Acepta cuando:** mando la foto de la tabla del horario, el bot pregunta qué lunes empezó la Semana A, respondo «el martes 1 de septiembre», y a partir de ahí `/manana` y `/horario` cuadran con la tabla. Un festivo entre semana cancela solo ese día sin correr la rotación. Con la agenda vacía pero horario cargado, la notificación de las 19:00 dice la clase en vez de pedir una foto.
 
-### Fase 5 (opcional) — Integración con Home Assistant
+### Fase 5 — Integración con Home Assistant
 - Si la notificación por Telegram falla, disparar `POST {HA_URL}/api/services/notify/{HA_NOTIFY_SERVICE}` con `HA_TOKEN`. Solo si las variables están configuradas.
+- **Acepta cuando:** sin `HA_*` el comportamiento es idéntico al de antes; con Telegram caído y HA configurado, el aviso llega por HA y `notifications_log` lo refleja en su `error`; un fallo de HA no rompe el job de las 19:00.
+
+### Fase 8 (diseñada, sin empezar) — Búsqueda híbrida
+- RRF sobre `agenda_entries` + una tabla de notas, con respuesta redactada por el LLM. Ver `CLAUDE.md` para el diseño verificado. Aplazada hasta que haya corpus: con `agenda_entries` vacío no se puede juzgar si acierta.
 
 ---
 
@@ -594,7 +600,7 @@ Validación en arranque (`config.py`): fallar con mensaje claro si un proveedor 
 | **Inyección de prompt** vía texto de Telegram o texto dentro de una foto (más grave con `claude_sdk`, que es un agente con herramientas) | Solo `Read` en visión, ninguna herramienta en texto, `Bash`/`Write`/web deshabilitados; salida solo JSON validado; el modelo nunca ejecuta acciones; instrucción explícita en el prompt de tratar la imagen como datos |
 | Fechas relativas mal resueltas | Fecha y día de la semana en cada prompt; fechas absolutas en el JSON; confirmación muestra fecha completa con día de la semana |
 | Function calling poco fiable en modelos pequeños | No se usa; intención por JSON schema + handlers deterministas |
-| Fallo silencioso (no llegó la notificación) | `notifications_log`, nudge en caso vacío, `/estado`, fallback a HA |
+| Fallo silencioso (no llegó la notificación) | `notifications_log`, nudge en caso vacío, `/estado`, y aviso por Home Assistant si Telegram falla (Fase 5, si `HA_*` está configurado) |
 | LLM en CPU lento | Timeouts largos, "leyendo..." inmediato, una foto a la vez, comandos `/` sin LLM |
 | Dos padres editando lo mismo | Confirmaciones pendientes por chat; todo versionado en `sources` |
 | Cambio de modelo o de versión del SDK rompe el JSON | Validación pydantic + reintento; `check_llm.py` al cambiar de modelo/proveedor; pin de versiones en `pyproject.toml` |
