@@ -23,6 +23,7 @@ from app.graph.state import GraphContext, GraphState
 from app.llm import compose
 from app.llm.provider import LLMError
 from app.llm.schemas import ExtractionResult, QAPair
+from app.llm.tenant import NoCredentialsError
 from app.log import get_logger
 from app.services import agenda, chat, ingest
 from app.services import scope as scope_service
@@ -62,6 +63,11 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
     """
     ctx = runtime.context
     sc = await _scope(state)
+    try:
+        chain = await ctx.tenants.for_family(sc.family_id)
+    except NoCredentialsError as exc:
+        # Sin clave no hay lectura posible, pero el mensaje explica cómo arreglarlo.
+        return {"error": str(exc)}
     photo = state.get("photo") or {}
     source_id = state.get("source_id")
     if source_id is not None and photo.get("local_path"):
@@ -70,7 +76,7 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
                 source_id,
                 Path(photo["local_path"]),
                 ctx.settings,
-                await ctx.tenants.for_family(sc.family_id),
+                chain,
                 photo.get("caption"),
                 family_id=sc.family_id,
             )
@@ -93,7 +99,7 @@ async def extract(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
             family_id=sc.family_id,
             download=ctx.download,
             settings=ctx.settings,
-            providers=await ctx.tenants.for_family(sc.family_id),
+            providers=chain,
             note=photo.get("caption"),
         )
     except ingest.IngestError as exc:
@@ -149,6 +155,8 @@ async def refine(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str,
             await ctx.tenants.for_family(sc.family_id),
             family_id=sc.family_id,
         )
+    except NoCredentialsError as exc:
+        return {"answers": state.get("answers", [])[:-1], "error": str(exc)}
     except LLMError as exc:
         log.warning("graph_refine_failed", source_id=source_id, error=str(exc))
         # Se devuelve la última respuesta a la cola: la pregunta vuelve a estar viva.
@@ -200,6 +208,8 @@ async def correct(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str
             await ctx.tenants.for_family(sc.family_id),
             family_id=sc.family_id,
         )
+    except NoCredentialsError as exc:
+        return {"error": str(exc)}
     except LLMError as exc:
         log.warning("graph_correction_failed", source_id=source_id, error=str(exc))
         return {"error": compose.CORRECTION_FAILED_TEXT}

@@ -177,3 +177,47 @@ async def test_calls_are_counted_per_family(settings: Settings) -> None:
     since = datetime(2000, 1, 1, tzinfo=UTC)
     assert await repo.calls_this_month(TENANT.family_id, since) == 2
     assert await repo.calls_this_month(other.family_id, since) == 1
+
+
+# --- Que la falta de clave no se convierta en una traza --------------------------------------
+
+
+async def test_a_family_without_a_key_gets_a_message_not_a_crash(settings: Settings) -> None:
+    """El fallo que se coló al desplegar 9.2: nadie atrapaba `NoCredentialsError`.
+
+    La familia del operador quedó sin `uses_host_llm` y sin credenciales, y el nodo la dejaba
+    escapar: traza en el log y silencio absoluto en el chat. El mensaje ya viene escrito para
+    el chat; solo faltaba que alguien lo recogiera.
+    """
+    from dataclasses import dataclass
+
+    from app.graph import nodes
+    from app.graph.state import GraphContext, GraphState
+
+    tenants = TenantProviders(settings)
+
+    async def no_key(family_id: int) -> object:
+        raise NoCredentialsError("falta configurar la clave de «openai» para esta familia.")
+
+    tenants.for_family = no_key  # type: ignore[method-assign, assignment]
+
+    async def download(file_id: str, destination: object) -> None: ...
+
+    @dataclass
+    class FakeRuntime:
+        context: GraphContext
+
+    state: GraphState = {
+        "chat_id": -1,
+        "child_id": TENANT.child_id,
+        "flow": "photo",
+        "photo": {"file_id": "f", "user_id": 1, "display_name": "x", "caption": None},
+        "queue": [],
+        "questions": [],
+        "answers": [],
+        "attempts": 0,
+    }
+    context = GraphContext(settings=settings, tenants=tenants, download=download)
+    result = await nodes.extract(state, FakeRuntime(context))  # type: ignore[arg-type]
+
+    assert "clave" in (result.get("error") or "")
