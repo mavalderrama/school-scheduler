@@ -12,12 +12,12 @@ import html
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from app.config import Settings
 from app.db import repo
-from app.db.models import AgendaEntry, NotificationKind
-from app.llm.compose import KIND_LABELS, format_date_es, slot_lines
+from app.db.models import AgendaEntry, NotificationKind, Reminder
+from app.llm.compose import KIND_LABELS, format_date_es, format_reminder, slot_lines
 from app.llm.prompting import weekday_es
 from app.log import get_logger
 from app.services import ha, schoolcal
@@ -134,6 +134,32 @@ async def build_daily_message(
 # --- Envío -----------------------------------------------------------------------------
 
 
+async def _attempt(
+    send: Sender,
+    chat_id: int,
+    text: str,
+    *,
+    settings: Settings | None,
+    kind: NotificationKind,
+) -> str | None:
+    """Intenta el envío. Devuelve `None` si salió bien, o el error ya formateado.
+
+    El plan B de Home Assistant vive aquí y no en cada llamador: es la rama de un envío que
+    **ya falló**, y el resultado se anota junto al error para que `/estado` no diga que el
+    aviso no llegó cuando sí llegó por la otra vía.
+    """
+    try:
+        await send(chat_id, text)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        log.exception("notify_failed", kind=kind, chat_id=chat_id)
+        if settings is not None and ha.configured(settings):
+            relayed = await ha.notify(settings, _plain(text))
+            error += " | HA: enviado" if relayed else " | HA: también falló"
+        return error
+    return None
+
+
 async def _send_to_chats(
     send: Sender,
     chat_ids: Sequence[int],
@@ -144,27 +170,25 @@ async def _send_to_chats(
     text: str,
     settings: Settings | None = None,
     child_id: int | None = None,
+    reminder_id: int | None = None,
 ) -> list[Outcome]:
     outcomes: list[Outcome] = []
     for chat_id in chat_ids:
-        if await repo.notification_sent_ok(idempotency_kinds, target, chat_id, child_id):
+        if await repo.notification_sent_ok(
+            idempotency_kinds, target, chat_id, child_id, reminder_id
+        ):
             log.info("notify_skipped", kind=kind, target=target.isoformat(), chat_id=chat_id)
             outcomes.append(Outcome(chat_id, kind, sent=False, skipped=True))
             continue
-        error: str | None = None
-        try:
-            await send(chat_id, text)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            log.exception("notify_failed", kind=kind, chat_id=chat_id)
-            # Plan B: si Telegram no responde, se intenta por Home Assistant. El resultado
-            # se anota junto al error para que `/estado` no diga que el aviso no llegó
-            # cuando sí llegó por la otra vía.
-            if settings is not None and ha.configured(settings):
-                relayed = await ha.notify(settings, _plain(text))
-                error += " | HA: enviado" if relayed else " | HA: también falló"
+        error = await _attempt(send, chat_id, text, settings=settings, kind=kind)
         await repo.log_notification(
-            kind, target, chat_id, ok=error is None, error=error, child_id=child_id
+            kind,
+            target,
+            chat_id,
+            ok=error is None,
+            error=error,
+            child_id=child_id,
+            reminder_id=reminder_id,
         )
         log.info(
             "notify_sent", kind=kind, target=target.isoformat(), chat_id=chat_id, ok=error is None
@@ -238,4 +262,35 @@ async def send_gap_check(
         text=format_gaps(gaps),
         settings=settings,
         child_id=scope.child_id,
+    )
+
+
+# --- Recordatorios ------------------------------------------------------------------------
+
+
+async def send_reminder(
+    send: Sender,
+    settings: Settings,
+    reminder: Reminder,
+    *,
+    scope: Scope,
+    fire_at: datetime,
+    late: bool = False,
+) -> list[Outcome]:
+    """Manda un recordatorio al chat donde se pidió.
+
+    Pasa por `_send_to_chats` como todo lo demás para heredar el plan B de Home Assistant y
+    la fila de auditoría. La fecha objetivo es la **local** de la ocurrencia: un recordatorio
+    suena como mucho una vez al día, así que con esa fecha y el id basta para no repetirlo.
+    """
+    return await _send_to_chats(
+        send,
+        [reminder.chat_id],
+        kind=NotificationKind.REMINDER,
+        idempotency_kinds=(NotificationKind.REMINDER,),
+        target=fire_at.astimezone(scope.zoneinfo).date(),
+        text=format_reminder(reminder.text, late=late),
+        settings=settings,
+        child_id=scope.child_id,
+        reminder_id=reminder.pk,
     )

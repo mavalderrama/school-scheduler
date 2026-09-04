@@ -107,6 +107,6 @@ async def on_candidate_chosen(
         query,
         bot,
         runner,
-        {"action": "confirm", "entry_id": callback_data.entry_id},
+        {"action": "confirm", "target_id": callback_data.target_id},
         "Hecho",
     )

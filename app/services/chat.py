@@ -13,13 +13,13 @@ from typing import Any
 
 from app.config import Settings
 from app.db import repo
-from app.db.models import AgendaEntry
+from app.db.models import AgendaEntry, Reminder
 from app.llm import compose
 from app.llm.prompting import format_history, weekday_es
 from app.llm.provider import LLMError, LLMProviders
 from app.llm.schemas import ChatTurn, Intent
 from app.log import get_logger
-from app.services import cache
+from app.services import cache, reminders
 from app.services import schedule as schedule_service
 from app.services.scope import Scope
 
@@ -295,6 +295,79 @@ async def prepare_remove(scope: Scope, intent: Intent, today: date, chat_id: int
     )
 
 
+# --- Recordatorios --------------------------------------------------------------------
+
+
+async def prepare_reminder(scope: Scope, intent: Intent, today: date, chat_id: int) -> ChatReply:
+    """Prepara el alta de un recordatorio. **No guarda nada**: eso lo hace el ✅."""
+    text = (intent.text or "").strip()
+    if not text:
+        return ChatReply(text="¿De qué te aviso? Por ejemplo: «recuérdame a las 7 el disfraz».")
+    if not intent.time_of_day:
+        # El prompt tiene prohibido adivinar una hora ambigua, así que aquí se pregunta.
+        return ChatReply(text=compose.ASK_REMINDER_TIME_TEXT)
+
+    repeat = intent.repeat or "once"
+    weekdays = reminders.format_weekdays(intent.weekdays or []) if repeat == "weekly" else ""
+    if repeat == "weekly" and not weekdays:
+        return ChatReply(text="¿Qué días? Por ejemplo: «los lunes y miércoles a las 7».")
+    on_date = (intent.date_from or today) if repeat == "once" else None
+
+    edit: dict[str, Any] = {
+        "edit_id": _new_edit_id(),
+        "chat_id": chat_id,
+        "action": "add_reminder",
+        "text": text,
+        "time_of_day": intent.time_of_day,
+        "repeat": repeat,
+        "weekdays": weekdays,
+        "on_date": on_date.isoformat() if on_date is not None else None,
+        "only_school_days": bool(intent.only_school_days),
+    }
+    return ChatReply(
+        text=compose.format_reminder_question(reminders.draft_from_edit(edit)), edit=edit
+    )
+
+
+async def list_reminders(scope: Scope) -> ChatReply:
+    """Sin confirmación: solo lee."""
+    return ChatReply(text=compose.format_reminders(await repo.reminders_of(scope.child_id)))
+
+
+async def prepare_remove_reminder(scope: Scope, intent: Intent, chat_id: int) -> ChatReply:
+    candidates = await repo.find_active_reminders(scope.child_id, intent.target_entry_hint)
+    if not candidates and intent.target_entry_hint:
+        # La pista no casó con nada: se ofrecen todos, como en las entradas.
+        candidates = await repo.find_active_reminders(scope.child_id)
+    if not candidates:
+        return ChatReply(text=compose.NO_REMINDERS_TEXT)
+
+    if len(candidates) == 1:
+        found = candidates[0]
+        return ChatReply(
+            text=f"¿Quito el recordatorio {compose.describe_reminder(found)}?",
+            edit={
+                "edit_id": _new_edit_id(),
+                "chat_id": chat_id,
+                "action": "remove_reminder",
+                "reminder_id": found.pk,
+            },
+        )
+
+    shortlist = candidates[:MAX_CANDIDATES]
+    return ChatReply(
+        text=compose.format_reminder_candidates(shortlist),
+        edit={"edit_id": _new_edit_id(), "chat_id": chat_id, "action": "remove_reminder"},
+        candidates=[(r.pk, reminder_label(r)) for r in shortlist],
+    )
+
+
+def reminder_label(reminder: Reminder) -> str:
+    """Etiqueta corta para un botón de Telegram (máximo 60 caracteres)."""
+    label = compose.describe_reminder(reminder).replace("«", "").replace("»", "")
+    return label[:57] + "…" if len(label) > 60 else label
+
+
 async def query_subject(scope: Scope, intent: Intent, today: date) -> ChatReply:
     """«¿cuándo hay natación?»: se calcula con el horario, sin tocar el LLM otra vez."""
     subject = (intent.subject or intent.text or "").strip()
@@ -317,6 +390,12 @@ async def dispatch(scope: Scope, intent: Intent, *, today: date, chat_id: int) -
         return await prepare_add(intent, today, chat_id)
     if intent.action == "remove_entry":
         return await prepare_remove(scope, intent, today, chat_id)
+    if intent.action == "add_reminder":
+        return await prepare_reminder(scope, intent, today, chat_id)
+    if intent.action == "list_reminders":
+        return await list_reminders(scope)
+    if intent.action == "remove_reminder":
+        return await prepare_remove_reminder(scope, intent, chat_id)
     if intent.action == "help":
         return ChatReply(text=compose.HELP_TEXT)
     return ChatReply(

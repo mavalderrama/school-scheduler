@@ -25,7 +25,13 @@ def test_register_jobs_uses_configured_times_and_timezone(settings: Settings) ->
     register_jobs(scheduler, settings, bot, providers(FakeProvider("a")), runner)
 
     jobs = {job.id: job for job in scheduler.get_jobs()}
-    assert set(jobs) == {"daily_notify", "gap_check", "retry_photos", "purge_photos"}
+    assert set(jobs) == {
+        "daily_notify",
+        "gap_check",
+        "retry_photos",
+        "purge_photos",
+        "reminders",
+    }
 
     daily = jobs["daily_notify"].trigger
     assert isinstance(daily, CronTrigger)

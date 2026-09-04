@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 
 import pytest
 
@@ -351,3 +352,133 @@ async def test_a_day_with_only_a_class_is_not_empty() -> None:
     )
     assert "Natación" in reply.text
     assert "No tengo nada" not in reply.text
+
+
+# --- Fase 10: recordatorios ------------------------------------------------------------------
+
+
+async def test_add_reminder_asks_for_confirmation_and_saves_nothing() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_reminder", text="el disfraz", time_of_day="07:00", repeat="daily"),
+        today=MON,
+        chat_id=-4242,
+    )
+
+    assert reply.edit is not None
+    assert reply.edit["action"] == "add_reminder"
+    assert reply.edit["time_of_day"] == "07:00"
+    assert "07:00" in reply.text and "el disfraz" in reply.text
+    # Nada en la DB hasta el ✅.
+    assert await repo.reminders_of(TENANT.child_id) == []
+
+
+async def test_without_an_hour_it_asks_instead_of_guessing() -> None:
+    """El prompt tiene prohibido inventarse una hora ambigua; aquí se pregunta."""
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_reminder", text="el disfraz"),
+        today=MON,
+        chat_id=1,
+    )
+
+    assert reply.edit is None
+    assert "hora" in reply.text.lower()
+
+
+async def test_weekly_without_days_asks_which_ones() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_reminder", text="natación", time_of_day="07:00", repeat="weekly"),
+        today=MON,
+        chat_id=1,
+    )
+    assert reply.edit is None
+    assert "días" in reply.text
+
+
+async def test_a_weekly_reminder_carries_its_days() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(
+            action="add_reminder",
+            text="natación",
+            time_of_day="17:30",
+            repeat="weekly",
+            weekdays=[3, 1],
+        ),
+        today=MON,
+        chat_id=1,
+    )
+    assert reply.edit is not None and reply.edit["weekdays"] == "13"
+    assert "lunes y miércoles" in reply.text
+
+
+async def test_listing_reminders_needs_no_confirmation() -> None:
+    await repo.create_reminder(
+        child_id=TENANT.child_id,
+        chat_id=1,
+        text="revisar la agenda",
+        time_of_day=dt_time(7, 0),
+        repeat="daily",
+        next_fire_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    reply = await chat.dispatch(
+        await a_scope(), Intent(action="list_reminders"), today=MON, chat_id=1
+    )
+
+    assert reply.edit is None and reply.candidates is None
+    assert "revisar la agenda" in reply.text
+
+
+async def test_listing_with_nothing_says_so() -> None:
+    reply = await chat.dispatch(
+        await a_scope(), Intent(action="list_reminders"), today=MON, chat_id=1
+    )
+    assert "No tienes recordatorios" in reply.text
+
+
+async def test_removing_with_several_candidates_offers_a_choice() -> None:
+    for text in ("natación del martes", "natación del jueves"):
+        await repo.create_reminder(
+            child_id=TENANT.child_id,
+            chat_id=1,
+            text=text,
+            time_of_day=dt_time(7, 0),
+            repeat="daily",
+            next_fire_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="remove_reminder", target_entry_hint="natación"),
+        today=MON,
+        chat_id=1,
+    )
+
+    assert reply.candidates is not None and len(reply.candidates) == 2
+    assert all(len(label) <= 60 for _, label in reply.candidates)
+    assert reply.edit is not None and "reminder_id" not in reply.edit
+
+
+async def test_removing_a_single_candidate_asks_yes_or_no() -> None:
+    saved = await repo.create_reminder(
+        child_id=TENANT.child_id,
+        chat_id=1,
+        text="el disfraz",
+        time_of_day=dt_time(7, 0),
+        repeat="daily",
+        next_fire_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="remove_reminder", target_entry_hint="disfraz"),
+        today=MON,
+        chat_id=1,
+    )
+
+    assert reply.candidates is None
+    assert reply.edit is not None and reply.edit["reminder_id"] == saved.pk
+    assert "¿Quito" in reply.text

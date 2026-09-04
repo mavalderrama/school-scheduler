@@ -12,7 +12,7 @@ Convención con el ORM async de Django:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -34,6 +34,7 @@ from app.db.models import (
     MembershipRole,
     NotificationKind,
     NotificationLog,
+    Reminder,
     ScheduleSlot,
     ScheduleTemplate,
     School,
@@ -463,15 +464,25 @@ async def recent_history(chat_id: int, limit: int = 6) -> list[ChatTurn]:
 
 
 async def notification_sent_ok(
-    kinds: Sequence[NotificationKind], target_date: date, chat_id: int, child_id: int | None = None
+    kinds: Sequence[NotificationKind],
+    target_date: date,
+    chat_id: int,
+    child_id: int | None = None,
+    reminder_id: int | None = None,
 ) -> bool:
     """True si ya hubo un envío correcto de alguno de esos tipos para esa fecha y chat."""
     qs = NotificationLog.objects.filter(
         kind__in=list(kinds), target_date=target_date, chat_id=chat_id, ok=True
     )
     # `child_id=None` es un valor legítimo (avisos que no son de un niño concreto), y el
-    # unique parcial usa `nulls_distinct=False`, así que se filtra explícitamente.
+    # unique parcial usa `nulls_distinct=False`, así que se filtra explícitamente. Lo mismo
+    # con el recordatorio: sin este filtro, el aviso diario vería los de los recordatorios.
     qs = qs.filter(child_id__isnull=True) if child_id is None else qs.filter(child_id=child_id)
+    qs = (
+        qs.filter(reminder_id__isnull=True)
+        if reminder_id is None
+        else qs.filter(reminder_id=reminder_id)
+    )
     return await qs.aexists()
 
 
@@ -483,12 +494,14 @@ async def log_notification(
     ok: bool,
     error: str | None,
     child_id: int | None = None,
+    reminder_id: int | None = None,
 ) -> None:
     await NotificationLog.objects.acreate(
         kind=kind,
         target_date=target_date,
         chat_id=chat_id,
         child_id=child_id,
+        reminder_id=reminder_id,
         ok=ok,
         error=error,
     )
@@ -506,6 +519,96 @@ async def notifications(kind: NotificationKind | None = None) -> list[Notificati
     if kind is not None:
         qs = qs.filter(kind=kind)
     return [row async for row in qs]
+
+
+# --- Recordatorios ------------------------------------------------------------------------
+
+
+async def create_reminder(
+    *,
+    child_id: int,
+    chat_id: int,
+    text: str,
+    time_of_day: time,
+    repeat: str,
+    weekdays: str = "",
+    on_date: date | None = None,
+    only_school_days: bool = False,
+    next_fire_at: datetime | None,
+    created_by_id: int | None = None,
+) -> Reminder:
+    return await Reminder.objects.acreate(
+        child_id=child_id,
+        chat_id=chat_id,
+        text=text,
+        time_of_day=time_of_day,
+        repeat=repeat,
+        weekdays=weekdays,
+        on_date=on_date,
+        only_school_days=only_school_days,
+        next_fire_at=next_fire_at,
+        created_by_id=created_by_id,
+    )
+
+
+async def reminders_of(child_id: int) -> list[Reminder]:
+    """Los recordatorios vigentes de ese niño, en el orden en que se van a disparar."""
+    qs = Reminder.objects.filter(child_id=child_id, is_active=True).order_by(
+        F("next_fire_at").asc(nulls_last=True), "id"
+    )
+    return [row async for row in qs]
+
+
+async def find_active_reminders(child_id: int, hint: str | None = None) -> list[Reminder]:
+    """Candidatos a borrar. Mismo criterio que en las entradas: palabras de 4+ letras."""
+    qs = Reminder.objects.filter(child_id=child_id, is_active=True)
+    if hint:
+        words = [word for word in hint.split() if len(word) >= 4]
+        if words:
+            match = Q()
+            for word in words:
+                match |= Q(text__icontains=word)
+            qs = qs.filter(match)
+    return [row async for row in qs.order_by(F("next_fire_at").asc(nulls_last=True), "id")]
+
+
+async def get_reminder(reminder_id: int, *, child_id: int) -> Reminder | None:
+    """Un recordatorio **de ese niño**: el id llega de un botón, hay que comprobar de quién es."""
+    return await Reminder.objects.filter(pk=reminder_id, child_id=child_id).afirst()
+
+
+async def deactivate_reminder(reminder_id: int, *, child_id: int) -> bool:
+    """Lo apaga. No se borra la fila: deja de estar vigente y de tener próxima vez."""
+    updated = await Reminder.objects.filter(
+        pk=reminder_id, child_id=child_id, is_active=True
+    ).aupdate(is_active=False, next_fire_at=None)
+    return bool(updated)
+
+
+async def due_reminders(now: datetime, *, limit: int = 50) -> list[Reminder]:
+    """Los que ya tocan, de todos los niños: es el barrido programado, no una consulta de nadie."""
+    qs = (
+        Reminder.objects.select_related("child__school", "child__family")
+        .filter(is_active=True, next_fire_at__isnull=False, next_fire_at__lte=now)
+        .order_by("next_fire_at", "id")[:limit]
+    )
+    return [row async for row in qs]
+
+
+async def claim_reminder(
+    reminder_id: int, *, expected: datetime, next_fire_at: datetime | None, fired_at: datetime
+) -> bool:
+    """Reserva la ocurrencia antes de enviarla. False si otro barrido se adelantó.
+
+    La condición es el propio `next_fire_at` que se leyó: si ya cambió, esta ejecución no es
+    la dueña del envío. Evita el duplicado sin bloquear la fila.
+    """
+    updated = await Reminder.objects.filter(pk=reminder_id, next_fire_at=expected).aupdate(
+        next_fire_at=next_fire_at,
+        last_fired_at=fired_at,
+        is_active=next_fire_at is not None,
+    )
+    return bool(updated)
 
 
 # --- Consumo de LLM ---------------------------------------------------------------------

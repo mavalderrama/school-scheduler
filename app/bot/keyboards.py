@@ -34,9 +34,13 @@ class ScheduleCallback(CallbackData, prefix="sch"):
 
 
 class CandidateCallback(CallbackData, prefix="pick"):
-    """Elección entre varias entradas candidatas a borrar."""
+    """Elección entre varias candidatas a borrar: entradas de agenda o recordatorios.
 
-    entry_id: int
+    `target_id` y no `entry_id` porque qué es ese id lo dice la acción del `edit` que está
+    pendiente en el grafo, no el botón.
+    """
+
+    target_id: int
     edit_id: int
 
 
@@ -84,10 +88,10 @@ def candidates_keyboard(candidates: list[tuple[int, str]], edit_id: int) -> Inli
         [
             InlineKeyboardButton(
                 text=label,
-                callback_data=CandidateCallback(entry_id=entry_id, edit_id=edit_id).pack(),
+                callback_data=CandidateCallback(target_id=target_id, edit_id=edit_id).pack(),
             )
         ]
-        for entry_id, label in candidates
+        for target_id, label in candidates
     ]
     rows.append(
         [

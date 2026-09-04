@@ -8,9 +8,10 @@ saver y el grafo y se reconstruyen desde Postgres— y la conversación tiene qu
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -30,6 +31,13 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 ANCHOR = date(2026, 8, 31)
 CHAT = -100777
+
+
+def today() -> date:
+    """Hoy de verdad. Un horario se guarda vigente **desde hoy**, así que preguntar por una
+    fecha fija hacía que el test caducara: pasó al llegar el día siguiente."""
+    return datetime.now(ZoneInfo("America/Bogota")).date()
+
 
 K4A = [
     ("A", 1, "1", "Artes plásticas"),
@@ -141,7 +149,7 @@ async def test_the_conversation_survives_a_restart(settings: Settings, clean_thr
         assert resumed is not None and resumed.finished
         assert resumed.reply is not None and "Guardado" in resumed.reply
 
-    template = await repo.active_schedule(TENANT.child_id, date(2026, 9, 2))
+    template = await repo.active_schedule(TENANT.child_id, today())
     assert template is not None and template.anchor_monday == ANCHOR
 
 
@@ -160,7 +168,7 @@ async def test_a_photo_awaiting_confirmation_survives_a_restart(
         resumed = await runner.resume(CHAT, {"action": "confirm"})
         assert resumed is not None and resumed.finished and resumed.reply is not None
 
-    assert await repo.active_schedule(TENANT.child_id, date(2026, 9, 2)) is not None
+    assert await repo.active_schedule(TENANT.child_id, today()) is not None
 
 
 async def test_the_photo_queue_survives_a_restart(settings: Settings, clean_thread: None) -> None:
@@ -210,7 +218,7 @@ async def test_cancelling_during_a_question_discards_the_photo(
         resumed = await runner.resume(CHAT, "descarta")
         assert resumed is not None and resumed.finished
         assert resumed.reply is not None and "descarto" in resumed.reply.lower()
-    assert await repo.active_schedule(TENANT.child_id, date(2026, 9, 2)) is None
+    assert await repo.active_schedule(TENANT.child_id, today()) is None
 
 
 async def test_the_question_round_is_still_bounded(settings: Settings, clean_thread: None) -> None:
@@ -247,3 +255,73 @@ async def test_an_abandoned_conversation_expires(settings: Settings, clean_threa
         stale = GraphRunner(graph, context, saver, ttl_hours=0)
         assert await stale.is_waiting(CHAT) is False
         assert await stale.resume(CHAT, "tarde") is None
+
+
+async def test_a_reminder_confirmation_survives_a_restart(
+    settings: Settings, clean_thread: None
+) -> None:
+    """El `edit` del recordatorio pasa por el checkpointer: fechas y nulos incluidos."""
+    provider = FakeProvider("claude_sdk", result=schedule_extraction(ANCHOR))
+    edit = {
+        "edit_id": 77,
+        "chat_id": CHAT,
+        "action": "add_reminder",
+        "text": "el disfraz",
+        "time_of_day": "07:00",
+        "repeat": "weekly",
+        "weekdays": "13",
+        "on_date": None,
+        "only_school_days": True,
+    }
+    state: GraphState = {
+        "chat_id": CHAT,
+        "child_id": TENANT.child_id,
+        "flow": "edit",
+        "edit": edit,
+        "user_id": None,
+        "queue": [],
+    }
+
+    async for runner in make_runner(settings, provider):
+        turn = await runner.start(CHAT, state)
+        assert turn.ask is not None and turn.ask.kind == "edit"
+
+    # --- REINICIO --- y se confirma desde otro proceso.
+    async for runner in make_runner(settings, provider):
+        resumed = await runner.resume(CHAT, {"action": "confirm", "edit_id": 77})
+        assert resumed is not None and resumed.finished
+        assert resumed.reply is not None and "Te aviso" in resumed.reply
+
+    saved = await repo.reminders_of(TENANT.child_id)
+    assert len(saved) == 1
+    assert (saved[0].weekdays, saved[0].only_school_days) == ("13", True)
+    assert saved[0].next_fire_at is not None
+
+
+async def test_rejecting_a_reminder_saves_nothing(settings: Settings, clean_thread: None) -> None:
+    provider = FakeProvider("claude_sdk", result=schedule_extraction(ANCHOR))
+    state: GraphState = {
+        "chat_id": CHAT,
+        "child_id": TENANT.child_id,
+        "flow": "edit",
+        "edit": {
+            "edit_id": 78,
+            "chat_id": CHAT,
+            "action": "add_reminder",
+            "text": "nada",
+            "time_of_day": "07:00",
+            "repeat": "daily",
+            "weekdays": "",
+            "on_date": None,
+            "only_school_days": False,
+        },
+        "user_id": None,
+        "queue": [],
+    }
+
+    async for runner in make_runner(settings, provider):
+        await runner.start(CHAT, state)
+        resumed = await runner.resume(CHAT, {"action": "reject", "edit_id": 78})
+        assert resumed is not None and resumed.finished
+
+    assert await repo.reminders_of(TENANT.child_id) == []

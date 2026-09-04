@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import html
 from collections.abc import Iterable, Sequence
-from datetime import date
+from datetime import date, time
 from typing import Any, Protocol
 
-from app.llm.prompting import weekday_es
+from app.llm.prompting import WEEKDAYS_ES, weekday_es
 from app.llm.schemas import (
     WEEKDAY_LABELS,
     ExtractedEntry,
@@ -267,6 +267,7 @@ HELP_TEXT = (
     "• «¿qué hay esta semana?»\n"
     "• «agrega que el martes lleva disfraz»\n"
     "• «quita lo del jueves»\n"
+    "• «recuérdame todos los días a las 7 que revise la agenda»\n"
     "\n"
     "• «¿cuándo hay natación?»\n"
     "\n"
@@ -274,7 +275,8 @@ HELP_TEXT = (
     "empezó el ciclo y a partir de ahí te digo qué clase toca cada día.\n"
     "\n"
     "Comandos (funcionan aunque la IA esté caída):\n"
-    "/hoy · /manana · /semana · /horario · /pendiente · /cancelar · /estado · /ayuda · /ping"
+    "/hoy · /manana · /semana · /horario · /recordatorios · /pendiente · /cancelar · "
+    "/estado · /ayuda · /ping"
 )
 
 
@@ -395,3 +397,111 @@ def format_applied(dates: list[date], inserted: int, superseded: int) -> str:
     else:
         text += "."
     return text
+
+
+# --- Recordatorios ---------------------------------------------------------------------
+
+
+class ReminderLike(Protocol):
+    """Lo que compose necesita de un recordatorio, sin importar los modelos de Django."""
+
+    @property
+    def text(self) -> str: ...
+    @property
+    def time_of_day(self) -> time: ...
+    @property
+    def repeat(self) -> str: ...
+    @property
+    def weekdays(self) -> str: ...
+    @property
+    def on_date(self) -> date | None: ...
+    @property
+    def only_school_days(self) -> bool: ...
+
+
+def format_hhmm(moment: time) -> str:
+    return moment.strftime("%H:%M")
+
+
+def describe_schedule(
+    repeat: str, moment: time, weekdays: str, on_date: date | None, only_school_days: bool
+) -> str:
+    """«todos los días a las 07:00», «los lunes y miércoles a las 17:30»…"""
+    at = f"a las {format_hhmm(moment)}"
+    if repeat == "once":
+        return f"el {format_date_es(on_date)} {at}" if on_date is not None else at
+    if repeat == "weekly":
+        names = [WEEKDAYS_ES[int(day) - 1] for day in weekdays]
+        if not names:
+            return at
+        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} y {names[-1]}"
+        return f"los {listed} {at}"
+    return f"todos los días {at}" + (" que haya colegio" if only_school_days else "")
+
+
+def describe_reminder(reminder: ReminderLike) -> str:
+    """Una línea: para confirmar, para listar y para elegir cuál borrar."""
+    when = describe_schedule(
+        reminder.repeat,
+        reminder.time_of_day,
+        reminder.weekdays,
+        reminder.on_date,
+        reminder.only_school_days,
+    )
+    return f"«{html.escape(reminder.text)}» {when}"
+
+
+def format_reminder_question(reminder: ReminderLike) -> str:
+    return f"⏰ ¿Te aviso {describe_reminder(reminder)}?"
+
+
+def format_reminder_added(reminder: ReminderLike) -> str:
+    return f"✅ Hecho. Te aviso {describe_reminder(reminder)}."
+
+
+def format_reminder_removed(reminder: ReminderLike) -> str:
+    return f"✅ Quitado: ya no te aviso {describe_reminder(reminder)}."
+
+
+def format_reminders(reminders: Sequence[ReminderLike]) -> str:
+    if not reminders:
+        return NO_REMINDERS_TEXT
+    lines = ["⏰ <b>Recordatorios</b>"]
+    lines.extend(f"• {describe_reminder(r)}" for r in reminders)
+    lines.append("")
+    lines.append("Dime «quita el recordatorio de…» para borrar uno.")
+    return "\n".join(lines)
+
+
+def format_reminder_candidates(reminders: Sequence[ReminderLike]) -> str:
+    lines = ["Tengo varios. ¿Cuál quito?"]
+    lines.extend(f"• {describe_reminder(r)}" for r in reminders)
+    return "\n".join(lines)
+
+
+def format_reminder(text: str, *, late: bool = False) -> str:
+    """El mensaje que llega a la hora."""
+    prefix = "⏰ <b>Recordatorio</b>"
+    if late:
+        # Se dice que va tarde en vez de fingir puntualidad: el bot estuvo caído.
+        prefix += " (con retraso)"
+    return f"{prefix}\n{html.escape(text)}"
+
+
+NO_REMINDERS_TEXT = (
+    "No tienes recordatorios programados. Dime algo como «recuérdame todos los días a las "
+    "7 que revise la agenda»."
+)
+
+ASK_REMINDER_TIME_TEXT = (
+    "¿A qué hora te aviso? Dímelo con la hora, por ejemplo «a las 7 de la mañana» o «19:30»."
+)
+
+REMINDER_NEVER_FIRES_TEXT = (
+    "Con esas condiciones no llegaría a sonar nunca. ¿Me lo dices de otra forma?"
+)
+
+TOO_MANY_REMINDERS_TEXT = (
+    "Ya tienes muchos recordatorios activos. Quita alguno con «quita el recordatorio de…» "
+    "antes de añadir otro."
+)

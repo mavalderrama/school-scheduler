@@ -146,6 +146,15 @@ async def cmd_horario(message: Message, settings: Settings) -> None:
     await message.answer("\n\n".join(blocks))
 
 
+@router.message(Command("recordatorios"))
+async def cmd_recordatorios(message: Message) -> None:
+    """Los avisos programados de este niño. Sin LLM: es la red de seguridad."""
+    sc = await _scope(message)
+    if sc is None:
+        return
+    await message.answer(compose.format_reminders(await repo.reminders_of(sc.child_id)))
+
+
 @router.message(Command("pendiente"))
 async def cmd_pendiente(message: Message, runner: GraphRunner) -> None:
     """Qué está esperando el bot en este chat. El estado sale del grafo, no de la memoria."""

@@ -233,6 +233,11 @@ SCOPED_BY_CHILD = {
     "active_schedules",
     "active_schedule",
     "get_child",
+    "create_reminder",
+    "reminders_of",
+    "find_active_reminders",
+    "get_reminder",
+    "deactivate_reminder",
 }
 SCOPED_BY_FAMILY = {
     "get_family",
@@ -271,6 +276,8 @@ INHERITS_SCOPE = {
     "clear_local_path",
     "log_llm_call",
     "last_notification",
+    # Recibe el id que acaba de devolver el barrido, con su niño ya resuelto.
+    "claim_reminder",
 }
 GLOBAL_ON_PURPOSE = {
     # Infraestructura, barridos programados y caché por hash de contenido.
@@ -296,6 +303,7 @@ GLOBAL_ON_PURPOSE = {
     "vector_extension_installed",
     "table_constraints",
     "active_children",
+    "due_reminders",
     "families_of",
     "is_member",
     "create_family",

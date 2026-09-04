@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -10,9 +10,9 @@ from app.db import repo
 from app.db.models import SourceKind, SourceStatus
 from app.graph import nodes
 from app.llm.schemas import ExtractedEntry, ExtractionResult
-from app.services import agenda, scope
+from app.services import agenda, reminders, scope
 from app.services.scope import Scope
-from tests.conftest import TENANT
+from tests.conftest import TENANT, make_child
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -94,7 +94,7 @@ async def apply_edit(edit: dict[str, object], entry_id: int | None = None) -> st
         "edit": edit,
         "user_id": None,
         "child_id": TENANT.child_id,
-        "decision": {"entry_id": entry_id},
+        "decision": {"target_id": entry_id},
     }
     result = await nodes.apply_edit(state, None)  # type: ignore[arg-type]
     return str(result["reply"])
@@ -143,3 +143,99 @@ async def test_conversation_history_roundtrip() -> None:
     ]
     assert [t.role for t in history] == ["user", "assistant", "user", "assistant"]
     assert [t.content for t in await repo.recent_history(2)] == ["otro chat"]
+
+
+# --- Recordatorios (Fase 10) ----------------------------------------------------------------
+
+
+def reminder_edit(**over: object) -> dict[str, object]:
+    edit: dict[str, object] = {
+        "edit_id": 10,
+        "chat_id": -4242,
+        "action": "add_reminder",
+        "text": "el disfraz",
+        "time_of_day": "07:00",
+        "repeat": "daily",
+        "weekdays": "",
+        "on_date": None,
+        "only_school_days": False,
+    }
+    edit.update(over)
+    return edit
+
+
+async def test_confirming_a_reminder_saves_it_with_its_first_time() -> None:
+    reply = await apply_edit(reminder_edit())
+
+    assert "Te aviso" in reply and "07:00" in reply
+    saved = await repo.reminders_of(TENANT.child_id)
+    assert len(saved) == 1
+    assert saved[0].text == "el disfraz"
+    # Va al chat donde se pidió, no al del niño.
+    assert saved[0].chat_id == -4242
+    assert saved[0].next_fire_at is not None
+
+
+async def test_a_one_off_whose_hour_already_passed_is_refused() -> None:
+    """Antes que guardar algo que no sonaría nunca, se dice."""
+    yesterday = date.today() - timedelta(days=1)
+    reply = await apply_edit(
+        reminder_edit(repeat="once", on_date=yesterday.isoformat(), time_of_day="07:00")
+    )
+
+    assert "nunca" in reply
+    assert await repo.reminders_of(TENANT.child_id) == []
+
+
+async def test_removing_a_reminder_switches_it_off() -> None:
+    await apply_edit(reminder_edit())
+    saved = (await repo.reminders_of(TENANT.child_id))[0]
+
+    reply = await apply_edit(
+        {"edit_id": 11, "chat_id": 1, "action": "remove_reminder", "reminder_id": saved.pk}
+    )
+
+    assert "ya no te aviso" in reply
+    assert await repo.reminders_of(TENANT.child_id) == []
+
+
+async def test_removing_a_reminder_that_is_gone() -> None:
+    edit = {"edit_id": 12, "chat_id": 1, "action": "remove_reminder", "reminder_id": 999_999}
+    assert "ya no está activo" in await apply_edit(edit)
+
+
+async def test_removing_a_reminder_of_another_family_does_nothing() -> None:
+    other = await make_child("Otra", chat_id=-777020)
+    theirs = await repo.create_reminder(
+        child_id=other.pk,
+        chat_id=-777020,
+        text="suyo",
+        time_of_day=time(7, 0),
+        repeat="daily",
+        next_fire_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    edit = {"edit_id": 13, "chat_id": 1, "action": "remove_reminder", "reminder_id": theirs.pk}
+    assert "ya no está activo" in await apply_edit(edit)
+
+    assert [r.text for r in await repo.reminders_of(other.pk)] == ["suyo"]
+
+
+async def test_the_cap_per_child_is_enforced() -> None:
+    for i in range(reminders.MAX_PER_CHILD):
+        await repo.create_reminder(
+            child_id=TENANT.child_id,
+            chat_id=1,
+            text=f"n{i}",
+            time_of_day=time(7, 0),
+            repeat="daily",
+            next_fire_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    assert "muchos recordatorios" in await apply_edit(reminder_edit())
+    assert len(await repo.reminders_of(TENANT.child_id)) == reminders.MAX_PER_CHILD
+
+
+async def test_an_unknown_action_is_answered_not_guessed() -> None:
+    """Con cuatro acciones, el `else` de antes habría borrado una entrada de agenda."""
+    assert "No sé qué hacer" in await apply_edit({"edit_id": 14, "chat_id": 1, "action": "vete"})

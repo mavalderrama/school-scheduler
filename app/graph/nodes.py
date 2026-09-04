@@ -25,7 +25,7 @@ from app.llm.provider import LLMError
 from app.llm.schemas import ExtractionResult, QAPair
 from app.llm.tenant import NoCredentialsError
 from app.log import get_logger
-from app.services import agenda, chat, ingest
+from app.services import agenda, chat, ingest, reminders
 from app.services import scope as scope_service
 
 log = get_logger(__name__)
@@ -264,24 +264,49 @@ async def present_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dic
 
 
 async def apply_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str, Any]:
-    """Ejecuta el alta o la baja ya confirmada."""
+    """Ejecuta la edición ya confirmada. Una rama explícita por acción.
+
+    Antes era `if action == "add": ... else: <baja de agenda>`. Con dos acciones más, ese
+    `else` habría aplicado una baja de agenda a un `remove_reminder`: lo que no se reconoce
+    se responde, no se adivina.
+    """
     edit = state.get("edit") or {}
     decision = state.get("decision") or {}
     user_id = state.get("user_id")
-    entry_id = decision.get("entry_id") if isinstance(decision, dict) else None
+    # El id que eligió el usuario entre las candidatas. Qué significa lo dice `action`.
+    chosen = decision.get("target_id") if isinstance(decision, dict) else None
 
     sc = await _scope(state)
-    if edit.get("action") == "add":
-        added = await agenda.add_entry(
-            sc,
-            date.fromisoformat(edit["entry_date"]),
-            edit.get("kind") or "note",
-            edit.get("text") or "",
-            user_id,
-        )
-        return {"reply": compose.format_added(added)}
+    action = edit.get("action")
+    if action == "add":
+        return await _apply_add(sc, edit, user_id)
+    if action == "remove":
+        return await _apply_remove(sc, edit, chosen, user_id)
+    if action == "add_reminder":
+        return await _apply_add_reminder(sc, edit, state, user_id)
+    if action == "remove_reminder":
+        return await _apply_remove_reminder(sc, edit, chosen)
+    log.warning("apply_edit_unknown_action", action=action, chat_id=state.get("chat_id"))
+    return {"reply": "No sé qué hacer con eso. Vuelve a pedírmelo, por favor."}
 
-    target = entry_id or edit.get("entry_id")
+
+async def _apply_add(
+    sc: scope_service.Scope, edit: dict[str, Any], user_id: int | None
+) -> dict[str, Any]:
+    added = await agenda.add_entry(
+        sc,
+        date.fromisoformat(edit["entry_date"]),
+        edit.get("kind") or "note",
+        edit.get("text") or "",
+        user_id,
+    )
+    return {"reply": compose.format_added(added)}
+
+
+async def _apply_remove(
+    sc: scope_service.Scope, edit: dict[str, Any], chosen: Any, user_id: int | None
+) -> dict[str, Any]:
+    target = chosen or edit.get("entry_id")
     if target is None:
         return {"reply": "No sé cuál quitar. Vuelve a pedírmelo, por favor."}
     found = await repo.get_entry(int(target), child_id=sc.child_id)
@@ -289,3 +314,58 @@ async def apply_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dict[
         return {"reply": "Esa entrada ya no está vigente."}
     await agenda.remove_entry(sc, found.pk, user_id)
     return {"reply": compose.format_removed(found)}
+
+
+async def _apply_add_reminder(
+    sc: scope_service.Scope, edit: dict[str, Any], state: GraphState, user_id: int | None
+) -> dict[str, Any]:
+    """Guarda el recordatorio y calcula cuándo suena por primera vez."""
+    if len(await repo.reminders_of(sc.child_id)) >= reminders.MAX_PER_CHILD:
+        return {"reply": compose.TOO_MANY_REMINDERS_TEXT}
+
+    draft = reminders.draft_from_edit(edit)
+    now = datetime.now(sc.zoneinfo)
+    first = reminders.next_occurrence(
+        repeat=draft.repeat,
+        weekdays=draft.weekdays,
+        time_of_day=draft.time_of_day,
+        on_date=draft.on_date,
+        only_school_days=draft.only_school_days,
+        after=now,
+        tz=sc.zoneinfo,
+        exceptions=await repo.calendar_exceptions(sc.school_id),
+        country=sc.country,
+    )
+    if first is None:
+        # Una hora que ya pasó hoy con `once`, o unas condiciones que no casan nunca.
+        return {"reply": compose.REMINDER_NEVER_FIRES_TEXT}
+
+    saved = await repo.create_reminder(
+        child_id=sc.child_id,
+        # Al chat donde se pidió, que puede no ser el del niño (un privado, por ejemplo).
+        chat_id=int(edit.get("chat_id") or state.get("chat_id") or 0),
+        text=draft.text,
+        time_of_day=draft.time_of_day,
+        repeat=draft.repeat,
+        weekdays=draft.weekdays,
+        on_date=draft.on_date,
+        only_school_days=draft.only_school_days,
+        next_fire_at=first,
+        created_by_id=user_id,
+    )
+    log.info("reminder_created", reminder_id=saved.pk, next_fire_at=first.isoformat())
+    return {"reply": compose.format_reminder_added(saved)}
+
+
+async def _apply_remove_reminder(
+    sc: scope_service.Scope, edit: dict[str, Any], chosen: Any
+) -> dict[str, Any]:
+    target = chosen or edit.get("reminder_id")
+    if target is None:
+        return {"reply": "No sé cuál quitar. Vuelve a pedírmelo, por favor."}
+    # El id llega de un botón: hay que comprobar de quién es antes de tocarlo.
+    found = await repo.get_reminder(int(target), child_id=sc.child_id)
+    if found is None or not found.is_active:
+        return {"reply": "Ese recordatorio ya no está activo."}
+    await repo.deactivate_reminder(found.pk, child_id=sc.child_id)
+    return {"reply": compose.format_reminder_removed(found)}

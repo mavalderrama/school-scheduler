@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import functools
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from aiogram import Bot
@@ -24,14 +24,21 @@ from django.utils import timezone
 
 from app.config import Settings
 from app.db import repo
+from app.db.models import NotificationKind
 from app.graph.runner import GraphRunner
 from app.llm.provider import LLMProviders
 from app.log import get_logger
-from app.services import notify, scope
+from app.services import notify, reminders, scope
 
 log = get_logger(__name__)
 
 MISFIRE_GRACE_S = 3600
+# El barrido de recordatorios NO usa la gracia de una hora de los demás jobs: aquí llegar
+# tarde no es inofensivo. Si el barrido se pierde, la política de retraso la decide
+# `reminders.due_action` mirando la ocurrencia, no APScheduler.
+REMINDER_SWEEP_S = 60
+REMINDER_GRACE_S = 60
+REMINDER_BATCH = 50
 RETENTION_HOUR, RETENTION_MINUTE = 4, 17  # de madrugada, lejos de las notificaciones
 RETRY_BATCH = 3
 
@@ -121,6 +128,71 @@ async def retry_photos_job(
 
 
 @db_job
+async def reminders_job(bot: Bot, settings: Settings) -> None:
+    """Dispara los recordatorios vencidos. Un barrido, no un job por recordatorio.
+
+    El estado vive en `reminders.next_fire_at`, así que un reinicio no pierde nada y no hay
+    que reprogramar nada al arrancar.
+
+    **Se reserva antes de enviar** (`claim_reminder`): la entrega es *como mucho una vez*. Si
+    el proceso muere entre la reserva y el envío, ese aviso se pierde; es preferible a que un
+    reinicio en el momento justo lo mande dos veces.
+    """
+    now = timezone.now()
+    send = telegram_sender(bot)
+    exceptions_by_school: dict[int, dict[date, tuple[str, str]]] = {}
+    fired = 0
+
+    for reminder in await repo.due_reminders(now, limit=REMINDER_BATCH):
+        due_at = reminder.next_fire_at
+        if due_at is None:  # pragma: no cover - lo excluye la propia consulta
+            continue
+        sc = scope.of(reminder.child)
+        if sc.school_id not in exceptions_by_school:
+            exceptions_by_school[sc.school_id] = await repo.calendar_exceptions(sc.school_id)
+        exceptions = exceptions_by_school[sc.school_id]
+
+        following = reminders.next_occurrence(
+            repeat=reminder.repeat,
+            weekdays=reminder.weekdays,
+            time_of_day=reminder.time_of_day,
+            on_date=reminder.on_date,
+            only_school_days=reminder.only_school_days,
+            after=now,
+            tz=sc.zoneinfo,
+            exceptions=exceptions,
+            country=sc.country,
+        )
+        # Reservar primero: si otro barrido se adelantó, este no manda nada.
+        if not await repo.claim_reminder(
+            reminder.pk, expected=due_at, next_fire_at=following, fired_at=now
+        ):
+            continue
+
+        what = reminders.due_action(reminder.repeat, due_at, now)
+        if what == "skip":
+            log.info("reminder_skipped", reminder_id=reminder.pk, due_at=due_at.isoformat())
+            await repo.log_notification(
+                NotificationKind.REMINDER,
+                due_at.astimezone(sc.zoneinfo).date(),
+                reminder.chat_id,
+                ok=False,
+                error="fuera de plazo: el bot estaba caído a esa hora",
+                child_id=sc.child_id,
+                reminder_id=reminder.pk,
+            )
+            continue
+
+        await notify.send_reminder(
+            send, settings, reminder, scope=sc, fire_at=due_at, late=what == "late"
+        )
+        fired += 1
+
+    if fired:
+        log.info("reminders_done", fired=fired)
+
+
+@db_job
 async def purge_photos_job(settings: Settings) -> None:
     """Retención: borra el archivo de fotos ya resueltas y antiguas. La fila se conserva."""
     before = timezone.now() - timedelta(days=settings.photo_retention_days)
@@ -191,6 +263,16 @@ def register_jobs(
         max_instances=1,
     )
     scheduler.add_job(
+        reminders_job,
+        IntervalTrigger(seconds=REMINDER_SWEEP_S, timezone=tz),
+        args=[bot, settings],
+        id="reminders",
+        replace_existing=True,
+        misfire_grace_time=REMINDER_GRACE_S,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
         purge_photos_job,
         CronTrigger(hour=RETENTION_HOUR, minute=RETENTION_MINUTE, timezone=tz),
         args=[settings],
@@ -201,7 +283,7 @@ def register_jobs(
     )
     log.info(
         "scheduler_jobs_registered",
-        count=4,
+        count=5,
         daily_notify_time=settings.daily_notify_time,
         gap_check_time=settings.gap_check_time,
         skip_weekend=settings.skip_weekend,

@@ -25,6 +25,7 @@ from app.db.models import (
     LLMCall,
     Membership,
     NotificationLog,
+    Reminder,
     ScheduleSlot,
     ScheduleTemplate,
     School,
@@ -338,3 +339,47 @@ class ChildAdmin(NoDeleteMixin, admin.ModelAdmin[Child]):
     list_display = ["name", "family", "school", "chat_id", "is_active"]
     list_filter = ["is_active", "school"]
     search_fields = ["name"]
+
+
+@admin.register(Reminder)
+class ReminderAdmin(NoDeleteMixin, admin.ModelAdmin[Reminder]):
+    """Solo se puede apagar desde aquí; el resto se edita hablando con el bot.
+
+    Cambiar la hora en el admin dejaría `next_fire_at` calculado con la anterior y el aviso
+    saldría a deshora, en silencio. Quien recalcula es el alta, así que los campos que
+    definen cuándo suena son de solo lectura y `is_active` es lo único editable.
+    """
+
+    list_display = [
+        "id",
+        "child",
+        "text",
+        "repeat",
+        "time_of_day",
+        "weekdays",
+        "only_school_days",
+        "next_fire_at",
+        "last_fired_at",
+        "is_active",
+    ]
+    list_filter = ["is_active", "repeat", "only_school_days"]
+    search_fields = ["text"]
+    list_select_related = ["child"]
+    ordering = ["-id"]
+    readonly_fields = [
+        "child",
+        "chat_id",
+        "text",
+        "repeat",
+        "time_of_day",
+        "weekdays",
+        "on_date",
+        "only_school_days",
+        "next_fire_at",
+        "last_fired_at",
+        "created_by",
+        "created_at",
+    ]
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False

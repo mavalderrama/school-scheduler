@@ -76,11 +76,17 @@ class QAPair(BaseModel):
     answer: str
 
 
+ReminderRepeat = Literal["once", "daily", "weekly"]
+
+
 IntentAction = Literal[
     "query_range",
     "query_subject",
     "add_entry",
     "remove_entry",
+    "add_reminder",
+    "list_reminders",
+    "remove_reminder",
     "confirm",
     "reject",
     "correct_pending",
@@ -102,6 +108,23 @@ class Intent(BaseModel):
     )
     subject: str | None = Field(
         default=None, description="Para query_subject: la materia por la que preguntan"
+    )
+    # La hora va como texto con patrón, no como `time`: es el formato que ya usa la
+    # configuración (HH:MM) y el que los cuatro proveedores pasan igual en el JSON schema.
+    # Quien la convierte es Python.
+    time_of_day: str | None = Field(
+        default=None,
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        description="Para los recordatorios: hora local en 24h HH:MM. Null si no la dijeron",
+    )
+    repeat: ReminderRepeat | None = Field(
+        default=None, description="Para add_reminder: cada cuánto se repite"
+    )
+    weekdays: list[int] | None = Field(
+        default=None, description="Para repeat='weekly': ISO 1=lunes ... 7=domingo"
+    )
+    only_school_days: bool | None = Field(
+        default=None, description="True solo si piden que sea únicamente los días de colegio"
     )
 
 

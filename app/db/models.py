@@ -59,6 +59,13 @@ class NotificationKind(models.TextChoices):
     DAILY = "daily", "Diaria"
     GAP_CHECK = "gap_check", "Chequeo de huecos"
     NUDGE_EMPTY = "nudge_empty", "Aviso de agenda vacía"
+    REMINDER = "reminder", "Recordatorio"
+
+
+class RepeatKind(models.TextChoices):
+    ONCE = "once", "Una vez"
+    DAILY = "daily", "Todos los días"
+    WEEKLY = "weekly", "Días de la semana"
 
 
 class LLMTask(models.TextChoices):
@@ -388,6 +395,16 @@ class NotificationLog(models.Model):
         verbose_name="niño",
     )
     kind = models.TextField(choices=NotificationKind, verbose_name="tipo")
+    # Qué recordatorio se mandó, cuando el aviso es uno. Entra en la clave de idempotencia
+    # porque dos recordatorios distintos del mismo día y chat comparten todo lo demás.
+    reminder = models.ForeignKey(
+        "Reminder",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="notifications",
+        verbose_name="recordatorio",
+    )
     target_date = models.DateField(null=True, blank=True, verbose_name="fecha objetivo")
     chat_id = models.BigIntegerField()
     sent_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="enviada")
@@ -402,7 +419,7 @@ class NotificationLog(models.Model):
             # El niño entra en la clave: dos hermanos en el mismo chat compartirían ranura
             # y el segundo aviso se descartaría por idempotencia.
             models.UniqueConstraint(
-                fields=["kind", "target_date", "chat_id", "child"],
+                fields=["kind", "target_date", "chat_id", "child", "reminder"],
                 condition=Q(ok=True),
                 nulls_distinct=False,
                 name="notif_log_ok_unique",
@@ -681,3 +698,95 @@ class Credential(models.Model):
 
     def __str__(self) -> str:
         return f"{self.provider} de {self.family_id}"
+
+
+class Reminder(models.Model):
+    """Un aviso que pidió el usuario: «el jueves a las 7 recuérdame el disfraz».
+
+    No es una entrada de agenda: no habla de un día del colegio, habla de una hora a la que
+    sonar. Por eso vive aparte y no pasa por el merge por fecha de `apply_source`.
+
+    Un recordatorio suena **como mucho una vez al día** (una hora, y `once`/`daily`/`weekly`).
+    De eso depende que la clave de idempotencia de `notifications_log`, que es por fecha,
+    baste para distinguir ocurrencias: si algún día se añade «cada N horas», esa clave deja
+    de servir y hay que darle grano de instante.
+
+    `next_fire_at` es el instante ya calculado de la próxima vez. Tenerlo en una columna
+    —en vez de recalcular la regla de cada fila en cada barrido— es lo que permite que el
+    job de cada minuto sea una consulta indexada, y es también el punto donde se **reserva**
+    la ocurrencia antes de enviarla. `null` significa que ya no vuelve a sonar.
+    """
+
+    child = models.ForeignKey(
+        "Child", on_delete=models.PROTECT, related_name="reminders", verbose_name="niño"
+    )
+    chat_id = models.BigIntegerField(verbose_name="chat de destino")
+    text = models.TextField(verbose_name="texto")
+    time_of_day = models.TimeField(verbose_name="hora (local del colegio)")
+    repeat = models.TextField(
+        choices=RepeatKind,
+        default=RepeatKind.ONCE,
+        db_default=RepeatKind.ONCE,
+        verbose_name="repetición",
+    )
+    # Dígitos ISO ordenados y sin repetir: "135" = lunes, miércoles y viernes. Solo se usa
+    # con `weekly`. Va como texto y no como arreglo de Postgres para no arrastrar
+    # `django.contrib.postgres` por un campo, ni una tabla hija por siete valores que
+    # siempre se leen juntos.
+    weekdays = models.TextField(default="", db_default="", blank=True, verbose_name="días")
+    on_date = models.DateField(null=True, blank=True, verbose_name="fecha (si es una vez)")
+    only_school_days = models.BooleanField(
+        default=False,
+        db_default=False,
+        verbose_name="solo días de colegio",
+        help_text="Respeta fines de semana, festivos y el calendario del colegio.",
+    )
+    next_fire_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="próxima vez", help_text="Vacío: ya no suena más."
+    )
+    last_fired_at = models.DateTimeField(null=True, blank=True, verbose_name="última vez")
+    is_active = models.BooleanField(default=True, db_default=True, verbose_name="vigente")
+    created_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        db_column="created_by",
+        related_name="reminders",
+        verbose_name="pedido por",
+    )
+    created_at = models.DateTimeField(db_default=Now(), editable=False, verbose_name="creado")
+
+    class Meta:
+        db_table = "reminders"
+        verbose_name = "recordatorio"
+        verbose_name_plural = "recordatorios"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(repeat__in=RepeatKind.values), name="reminder_repeat_check"
+            ),
+            models.CheckConstraint(
+                condition=Q(weekdays__regex=r"^[1-7]{0,7}$"), name="reminder_weekdays_check"
+            ),
+            # Un `once` sin fecha no se puede disparar nunca; es una fila rota, no un
+            # recordatorio.
+            models.CheckConstraint(
+                condition=~Q(repeat=RepeatKind.ONCE) | Q(on_date__isnull=False),
+                name="reminder_once_needs_date",
+            ),
+            # Un recordatorio vigente que nadie va a disparar nunca es una promesa muerta:
+            # que la base lo impida evita tener que acordarse en cada sitio que lo apaga.
+            models.CheckConstraint(
+                condition=Q(is_active=False) | Q(next_fire_at__isnull=False),
+                name="reminder_active_has_next",
+            ),
+        ]
+        indexes = [
+            # La consulta del barrido, una vez por minuto para siempre.
+            models.Index(
+                fields=["next_fire_at"], condition=Q(is_active=True), name="reminder_due_idx"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.time_of_day} {self.repeat}: {self.text[:40]}"
