@@ -119,12 +119,13 @@ async def add_entry(
 
 @dataclass(frozen=True)
 class RecurringResult:
-    """Lo que hizo un alta recurrente: qué horario quedó y si sustituyó a otro igual."""
+    """Lo que hizo un alta recurrente: qué horario quedó, si sustituyó a otro y qué se llevó."""
 
     schedule_id: int
     weekdays: str
     text: str
     replaced: bool
+    dropped: int = 0
 
 
 async def add_recurring(
@@ -134,6 +135,7 @@ async def add_recurring(
     *,
     today: date,
     user_id: int | None = None,
+    drop_entry_ids: Sequence[int] = (),
 ) -> RecurringResult:
     """Alta de algo que se repite cada semana: «todos los viernes hay natación».
 
@@ -145,6 +147,11 @@ async def add_recurring(
 
     Repetir el mismo nombre **reemplaza** al anterior en vez de duplicar la línea del día;
     lo reemplazado queda versionado, como todo lo demás.
+
+    `drop_entry_ids` son las entradas sueltas que la regla ya cubre (apuntadas a mano antes
+    de decir que se repetían). Se desactivan con **esta misma source**, así que el día que
+    alguien mire el historial verá que se fueron por esto y no por una baja aparte. El
+    usuario las vio listadas en la confirmación: aquí no se decide nada, se ejecuta.
     """
     user = await repo.get_user(user_id) if user_id is not None else None
     name = text[:1].upper() + text[1:]
@@ -166,15 +173,24 @@ async def add_recurring(
         ],
     )
     schedule_id = await repo.apply_schedule(source.pk, draft, valid_from=today, replace_ids=same)
+    dropped = 0
+    for entry_id in drop_entry_ids:
+        if await repo.deactivate_entry(entry_id, source.pk, child_id=scope.child_id):
+            dropped += 1
     log.info(
         "recurring_added",
         schedule_id=schedule_id,
         source_id=source.pk,
         weekdays=weekdays,
         replaced=same,
+        dropped=dropped,
     )
     return RecurringResult(
-        schedule_id=schedule_id, weekdays=weekdays, text=text, replaced=bool(same)
+        schedule_id=schedule_id,
+        weekdays=weekdays,
+        text=text,
+        replaced=bool(same),
+        dropped=dropped,
     )
 
 

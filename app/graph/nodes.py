@@ -338,9 +338,14 @@ async def _apply_add_recurring(
     if not weekdays or not text:
         return {"reply": "No sé qué apuntar. Vuelve a pedírmelo, por favor."}
     today = datetime.now(sc.zoneinfo).date()
-    result = await agenda.add_recurring(sc, weekdays, text, today=today, user_id=user_id)
+    drop_ids = [int(i) for i in edit.get("drop_ids") or []]
+    result = await agenda.add_recurring(
+        sc, weekdays, text, today=today, user_id=user_id, drop_entry_ids=drop_ids
+    )
     return {
-        "reply": compose.format_recurring_added(weekdays, text, replaced=result.replaced),
+        "reply": compose.format_recurring_added(
+            weekdays, text, replaced=result.replaced, dropped=result.dropped
+        ),
         "reminder_offer": {
             "edit_id": edit.get("edit_id"),
             "chat_id": edit.get("chat_id"),

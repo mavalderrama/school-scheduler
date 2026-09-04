@@ -411,22 +411,36 @@ def format_weekday_list(weekdays: str) -> str:
     return f"los {listed}"
 
 
-def format_recurring_question(weekdays: str, text: str) -> str:
-    return (
+def format_recurring_question(weekdays: str, text: str, *, dropped: Sequence[str] = ()) -> str:
+    """La pregunta del alta, diciendo qué entradas sueltas se van con ella.
+
+    Que se vean **antes** del ✅ es la diferencia entre limpiar un duplicado y borrarle algo
+    al usuario a sus espaldas.
+    """
+    question = (
         f"🔁 ¿Apunto <b>{html.escape(text)}</b> {format_weekday_list(weekdays)}, todas las semanas?"
     )
+    if not dropped:
+        return question
+    lines = [question, "", "Y quito estas, que la regla ya cubre:"]
+    lines.extend(f"• {d}" for d in dropped)
+    return "\n".join(lines)
 
 
-def format_recurring_added(weekdays: str, text: str, *, replaced: bool = False) -> str:
+def format_recurring_added(
+    weekdays: str, text: str, *, replaced: bool = False, dropped: int = 0
+) -> str:
     """Confirmación del alta + la pregunta del aviso, en un solo mensaje.
 
     Van juntas porque el grafo interrumpe justo después de guardar: si fueran dos mensajes,
     el primero se perdería (el runner solo manda el valor del `interrupt`).
     """
     what = "Actualizado" if replaced else "Guardado"
+    plural = "s" if dropped != 1 else ""
+    gone = f" Quité {dropped} entrada{plural} suelta{plural}." if dropped else ""
     return (
         f"✅ {what}: <b>{html.escape(text)}</b> {format_weekday_list(weekdays)}, todas las "
-        f"semanas. Lo verás en /hoy, /manana y /semana.\n"
+        f"semanas.{gone} Lo verás en /hoy, /manana y /semana.\n"
         f"\n"
         f"⏰ ¿Te aviso a alguna hora esos días? Dime la hora (por ejemplo «18:30» o «6 de "
         f"la tarde») o responde «no»."

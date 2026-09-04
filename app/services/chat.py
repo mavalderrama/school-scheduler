@@ -6,6 +6,7 @@ con Telegram: devuelve un `ChatReply` y el handler decide qué teclado ponerle.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -254,7 +255,78 @@ async def prepare_add(intent: Intent, today: date, chat_id: int) -> ChatReply:
     return ChatReply(text=compose.format_add_question(intent.date_from, kind, text), edit=edit)
 
 
-async def prepare_recurring(intent: Intent, chat_id: int) -> ChatReply:
+WEEKDAY_WORDS = {
+    "lunes": 1,
+    "martes": 2,
+    "miercoles": 3,
+    "jueves": 4,
+    "viernes": 5,
+    "sabado": 6,
+    "sabados": 6,
+    "domingo": 7,
+    "domingos": 7,
+}
+
+RECURRING_MARKERS = (
+    "recurrente",
+    "recurrencia",
+    "se repite",
+    "todas las semanas",
+    "cada semana",
+    "semanalmente",
+)
+"""Formas de decir «esto vuelve cada semana» que no nombran el día en plural."""
+
+_DAY_RE = re.compile(r"\b(lunes|martes|miercoles|jueves|viernes|sabados?|domingos?)\b")
+_EVERY_WEEK_RE = re.compile(
+    r"\b(los|todos los|cada) (lunes|martes|miercoles|jueves|viernes|sabados?|domingos?)\b"
+)
+
+RECURRING_LOOKAHEAD_DAYS = 35
+
+
+def recurring_days(text: str) -> list[int]:
+    """Días ISO si el mensaje describe algo que se repite; `[]` si habla de un día suelto.
+
+    Es la red de seguridad del clasificador, y por eso está en Python: «los viernes» y «el
+    viernes» se diferencian en una letra, el modelo resolvió el plural como una fecha
+    concreta (bug real: «agrega que los viernes tiene natación» se guardó solo para el
+    viernes 4) y una fecha inventada no se distingue de una correcta mirando el JSON.
+
+    Manda el artículo: «el viernes» es un día, «los viernes» son todos. Un marcador
+    explícito («es recurrente», «se repite») también vale, y así funciona la frase con la
+    que se corrige algo ya apuntado.
+    """
+    folded = _fold(text)
+    days = sorted({WEEKDAY_WORDS[word] for word in _DAY_RE.findall(folded)})
+    if not days:
+        return []
+    if _EVERY_WEEK_RE.search(folded) or any(m in folded for m in RECURRING_MARKERS):
+        return days
+    return []
+
+
+async def duplicate_entries(
+    scope: Scope, days: list[int], subject: str, today: date
+) -> list[AgendaEntry]:
+    """Entradas sueltas que la regla nueva va a repetir igualmente.
+
+    Sin esto, «los viernes hay natación» dicho después de haberlo apuntado a mano deja el
+    viernes con la línea dos veces, y quitar la suelta no se puede por texto.
+    """
+    if not subject:
+        return []
+    horizon = today + timedelta(days=RECURRING_LOOKAHEAD_DAYS)
+    found = await repo.find_active_entries(scope.child_id, today, horizon, subject)
+    return [
+        entry
+        for entry in found
+        if entry.entry_date.isoweekday() in days
+        and schedule_service.same_subject(entry.text, subject)
+    ]
+
+
+async def prepare_recurring(scope: Scope, intent: Intent, today: date, chat_id: int) -> ChatReply:
     """«Todos los viernes tiene natación»: una regla semanal, no una entrada con fecha.
 
     Antes esto no tenía dónde caer —`add_entry` exige una fecha y `add_reminder` una hora—,
@@ -267,14 +339,51 @@ async def prepare_recurring(intent: Intent, chat_id: int) -> ChatReply:
     weekdays = reminders.format_weekdays(intent.weekdays or [])
     if not weekdays:
         return ChatReply(text=compose.ASK_RECURRING_DAYS_TEXT)
+    drop = await duplicate_entries(scope, reminders.parse_weekdays(weekdays), text, today)
     edit: dict[str, Any] = {
         "edit_id": _new_edit_id(),
         "chat_id": chat_id,
         "action": "add_recurring",
         "weekdays": weekdays,
         "text": text,
+        "drop_ids": [entry.pk for entry in drop],
     }
-    return ChatReply(text=compose.format_recurring_question(weekdays, text), edit=edit)
+    return ChatReply(
+        text=compose.format_recurring_question(
+            weekdays, text, dropped=[compose.describe_entry(e) for e in drop]
+        ),
+        edit=edit,
+    )
+
+
+async def recurring_from_text(
+    scope: Scope, text: str, today: date, chat_id: int
+) -> ChatReply | None:
+    """«El evento de natación del viernes es recurrente», cuando el modelo dice `unknown`.
+
+    Aquí Python sabe algo que el modelo no: la entrada existe en la base. Si el mensaje
+    tiene forma de recurrencia y casa con **una sola** entrada vigente de ese día, se
+    propone convertirla en regla; si no casa con una, se devuelve None y contesta el
+    «no te entendí» de siempre, que es preferible a adivinar.
+    """
+    days = recurring_days(text)
+    if not days:
+        return None
+    horizon = today + timedelta(days=RECURRING_LOOKAHEAD_DAYS)
+    found = [
+        entry
+        for entry in await repo.find_active_entries(scope.child_id, today, horizon, text)
+        if entry.entry_date.isoweekday() in days
+    ]
+    subjects = {entry.text for entry in found}
+    if len(subjects) != 1:
+        return None
+    return await prepare_recurring(
+        scope,
+        Intent(action="add_recurring", text=subjects.pop(), weekdays=days),
+        today,
+        chat_id,
+    )
 
 
 async def prepare_remove(scope: Scope, intent: Intent, today: date, chat_id: int) -> ChatReply:
@@ -520,17 +629,29 @@ async def query_subject(scope: Scope, intent: Intent, today: date) -> ChatReply:
     return ChatReply(text=compose.format_next_occurrences(subject, found))
 
 
-async def dispatch(scope: Scope, intent: Intent, *, today: date, chat_id: int) -> ChatReply:
+async def dispatch(
+    scope: Scope, intent: Intent, *, today: date, chat_id: int, text: str = ""
+) -> ChatReply:
     """Intención ya clasificada → respuesta. `confirm`/`reject`/`correct_pending` los
-    resuelve el handler porque necesitan el estado pendiente y los proveedores."""
+    resuelve el handler porque necesitan el estado pendiente y los proveedores.
+
+    `text` es el mensaje original y solo lo usa la red de seguridad de `recurring_days`:
+    lo que el modelo clasificó como un día suelto puede ser una regla semanal.
+    """
     if intent.action == "query_range":
         return await query_range(scope, intent, today)
     if intent.action == "query_subject":
         return await query_subject(scope, intent, today)
     if intent.action == "add_entry":
+        # «los viernes» en plural es una regla, aunque el modelo haya resuelto una fecha.
+        days = recurring_days(text)
+        if days:
+            return await prepare_recurring(
+                scope, intent.model_copy(update={"weekdays": days}), today, chat_id
+            )
         return await prepare_add(intent, today, chat_id)
     if intent.action == "add_recurring":
-        return await prepare_recurring(intent, chat_id)
+        return await prepare_recurring(scope, intent, today, chat_id)
     if intent.action == "remove_recurring":
         return await prepare_remove_recurring(scope, intent, today, chat_id)
     if intent.action == "edit_slot":
@@ -545,6 +666,10 @@ async def dispatch(scope: Scope, intent: Intent, *, today: date, chat_id: int) -
         return await prepare_remove_reminder(scope, intent, chat_id)
     if intent.action == "help":
         return ChatReply(text=compose.HELP_TEXT)
+    # Último intento antes de rendirse: hacer recurrente algo que ya está apuntado.
+    converted = await recurring_from_text(scope, text, today, chat_id)
+    if converted is not None:
+        return converted
     return ChatReply(
         text=(
             "No te entendí. Prueba con «¿qué hay mañana?», «agrega que el martes lleva "

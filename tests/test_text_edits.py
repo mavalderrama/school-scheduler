@@ -459,3 +459,44 @@ async def test_choosing_which_schedule_to_remove_comes_from_the_button() -> None
     assert "Natación" in reply
 
     assert [t.pk for t in await repo.active_schedules(TENANT.child_id, date.today())] == [keep]
+
+
+async def test_confirming_a_recurring_also_removes_the_entries_it_covers() -> None:
+    """Lo que se enseñó en la pregunta es lo que se ejecuta: ni más ni menos."""
+    today = date.today()
+    friday = today + timedelta(days=(4 - today.weekday()) % 7)
+    await seed((friday, "event", "natación"), (friday, "bring", "toalla"))
+    active = await repo.active_entries(TENANT.child_id, friday, friday)
+    covered = next(e for e in active if e.text == "natación")
+
+    reply = await apply_edit(
+        {
+            "edit_id": 30,
+            "chat_id": 1,
+            "action": "add_recurring",
+            "weekdays": "5",
+            "text": "natación",
+            "drop_ids": [covered.pk],
+        }
+    )
+
+    assert "Quité 1 entrada suelta" in reply
+    left = await repo.active_entries(TENANT.child_id, friday, friday)
+    # La toalla no se toca: solo se va lo que la regla cubre.
+    assert [e.text for e in left] == ["toalla"]
+    gone = await repo.get_entry(covered.pk, child_id=TENANT.child_id)
+    assert gone is not None and gone.is_active is False and gone.superseded_by_id is not None
+    assert [t.name for t in await repo.active_schedules(TENANT.child_id, today)] == ["Natación"]
+
+
+async def test_a_recurring_without_duplicates_removes_nothing() -> None:
+    reply = await apply_edit(
+        {
+            "edit_id": 31,
+            "chat_id": 1,
+            "action": "add_recurring",
+            "weekdays": "5",
+            "text": "natación",
+        }
+    )
+    assert "Quité" not in reply

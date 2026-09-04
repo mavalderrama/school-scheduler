@@ -669,3 +669,86 @@ async def test_a_day_with_no_slot_is_said_not_invented() -> None:
     )
     assert reply.edit is None
     assert "No encontré esa franja" in reply.text
+
+
+# --- Fase 10.3: «los viernes» no es una fecha --------------------------------------------------
+
+
+def test_recurring_days_reads_the_article_not_the_verb() -> None:
+    """El plural es la señal, y se comprueba en Python: el modelo lo resolvió como fecha."""
+    assert chat.recurring_days("Agrega que los viernes tiene natación") == [5]
+    assert chat.recurring_days("todos los martes y los jueves hay refuerzo") == [2, 4]
+    assert chat.recurring_days("cada miércoles lleva flauta") == [3]
+    # Singular: un día concreto, no una regla.
+    assert chat.recurring_days("agrega que el martes lleva disfraz") == []
+    assert chat.recurring_days("¿qué hay el viernes?") == []
+    # Sin día no hay regla que construir, por mucho marcador que haya.
+    assert chat.recurring_days("esto es recurrente") == []
+
+
+def test_recurring_days_understands_saying_it_afterwards() -> None:
+    assert chat.recurring_days("El evento de natación del viernes es recurrente") == [5]
+    assert chat.recurring_days("lo del jueves se repite todas las semanas") == [4]
+
+
+async def test_a_plural_weekday_becomes_a_rule_even_if_the_model_said_add_entry() -> None:
+    """El bug de producción: «los viernes» se guardó como una entrada del viernes 4."""
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_entry", date_from=date(2026, 9, 4), kind="event", text="natación"),
+        today=date(2026, 9, 4),
+        chat_id=1,
+        text="Agrega que los viernes tiene natación",
+    )
+
+    assert reply.edit is not None
+    assert reply.edit["action"] == "add_recurring"
+    assert reply.edit["weekdays"] == "5"
+    assert reply.edit["text"] == "natación"
+
+
+async def test_a_singular_weekday_is_still_a_single_entry() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_entry", date_from=TUE, kind="bring", text="disfraz"),
+        today=MON,
+        chat_id=1,
+        text="agrega que el martes lleva disfraz",
+    )
+    assert reply.edit is not None and reply.edit["action"] == "add"
+
+
+async def test_saying_it_is_recurrent_converts_the_entry_the_model_could_not_place() -> None:
+    """«El evento de natación del viernes es recurrente» acababa en «no te entendí»."""
+    today = date.today()
+    friday = today + timedelta(days=(4 - today.weekday()) % 7)
+    await seed((friday, "event", "natación"))
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="unknown"),
+        today=today,
+        chat_id=1,
+        text="El evento de natación del viernes es recurrente",
+    )
+
+    assert reply.edit is not None
+    assert (reply.edit["action"], reply.edit["weekdays"]) == ("add_recurring", "5")
+    assert reply.edit["text"] == "natación"
+    # Y la entrada suelta se ofrece quitar en la misma pregunta, no a escondidas.
+    entry = (await repo.active_entries(TENANT.child_id, friday, friday))[0]
+    assert reply.edit["drop_ids"] == [entry.pk]
+    assert "quito estas" in reply.text.lower()
+
+
+async def test_without_a_matching_entry_it_still_says_it_did_not_understand() -> None:
+    """Preferible a inventarse de qué hablaba: no hay nada con qué construir la regla."""
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="unknown"),
+        today=date.today(),
+        chat_id=1,
+        text="lo del viernes es recurrente",
+    )
+    assert reply.edit is None
+    assert "No te entendí" in reply.text

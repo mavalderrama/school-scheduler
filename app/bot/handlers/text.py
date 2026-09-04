@@ -84,7 +84,7 @@ async def on_text(
         return
 
     today = datetime.now(sc.zoneinfo).date()
-    reply = await chat.dispatch(sc, intent, today=today, chat_id=chat_id)
+    reply = await chat.dispatch(sc, intent, today=today, chat_id=chat_id, text=text)
     await repo.save_message(chat_id, None, "assistant", reply.text)
 
     if reply.edit is None:
