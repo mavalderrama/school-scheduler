@@ -83,6 +83,7 @@ IntentAction = Literal[
     "query_range",
     "query_subject",
     "add_entry",
+    "add_recurring",
     "remove_entry",
     "add_reminder",
     "list_reminders",
@@ -121,7 +122,11 @@ class Intent(BaseModel):
         default=None, description="Para add_reminder: cada cuánto se repite"
     )
     weekdays: list[int] | None = Field(
-        default=None, description="Para repeat='weekly': ISO 1=lunes ... 7=domingo"
+        default=None,
+        description=(
+            "Días que se repiten, ISO 1=lunes ... 7=domingo. Para repeat='weekly' y para "
+            "add_recurring"
+        ),
     )
     only_school_days: bool | None = Field(
         default=None, description="True solo si piden que sea únicamente los días de colegio"

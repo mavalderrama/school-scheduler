@@ -82,6 +82,25 @@ def edit_keyboard(edit_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def no_reminder_keyboard(edit_id: int) -> InlineKeyboardMarkup:
+    """Salida de un toque a «¿te aviso a alguna hora?».
+
+    Solo lleva el «no»: el «sí» necesita una hora, y esa se escribe. Sin este botón, la
+    única forma de cerrar la pregunta sería escribir, que es justo lo que dejó atrapado al
+    usuario en la Fase 6.2.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔕 Sin aviso",
+                    callback_data=EditCallback(action="reject", edit_id=edit_id).pack(),
+                )
+            ]
+        ]
+    )
+
+
 def candidates_keyboard(candidates: list[tuple[int, str]], edit_id: int) -> InlineKeyboardMarkup:
     """Un botón por candidata (id, etiqueta corta) más un botón de cancelar."""
     rows = [

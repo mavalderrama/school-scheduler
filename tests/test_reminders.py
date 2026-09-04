@@ -184,6 +184,8 @@ def test_weekdays_round_trip_sorted_and_deduplicated() -> None:
     assert reminders.format_weekdays([3, 1, 1]) == "13"
     assert reminders.parse_weekdays("13") == [1, 3]
     assert reminders.format_weekdays([]) == ""
+    # Lo que no es un día ISO se descarta aquí, no revienta tres capas más abajo.
+    assert reminders.format_weekdays([0, 5, 8]) == "5"
 
 
 def test_draft_from_edit_reads_the_json_of_the_graph() -> None:
@@ -198,3 +200,37 @@ def test_draft_from_edit_reads_the_json_of_the_graph() -> None:
         }
     )
     assert (draft.text, draft.time_of_day, draft.on_date) == ("disfraz", SEVEN, date(2026, 9, 10))
+
+
+# --- La hora que contesta el usuario (Fase 10.1) ---------------------------------------------
+#
+# Se interpreta en Python, no con el LLM: es la respuesta a una pregunta que el bot acaba de
+# hacer y tiene que funcionar con el proveedor caído.
+
+
+def test_the_hour_is_read_in_its_usual_forms() -> None:
+    assert reminders.parse_time_of_day("18:30") == time(18, 30)
+    assert reminders.parse_time_of_day("a las 6") == time(6, 0)
+    assert reminders.parse_time_of_day("6 de la tarde") == time(18, 0)
+    assert reminders.parse_time_of_day("7 y media") == time(7, 30)
+    assert reminders.parse_time_of_day("7 y cuarto") == time(7, 15)
+    assert reminders.parse_time_of_day("6.30") == time(6, 30)
+    assert reminders.parse_time_of_day("a las 6:30 pm") == time(18, 30)
+    assert reminders.parse_time_of_day("mediodía") == time(12, 0)
+    assert reminders.parse_time_of_day("las 12 de la noche") == time(0, 0)
+    assert reminders.parse_time_of_day("a las 8 de la mañana") == time(8, 0)
+
+
+def test_what_is_not_an_hour_is_not_invented() -> None:
+    assert reminders.parse_time_of_day("hola") is None
+    assert reminders.parse_time_of_day("a las 25") is None
+    assert reminders.parse_time_of_day("") is None
+    # Un "no" es una respuesta, no una hora: nunca puede acabar en un recordatorio.
+    assert reminders.parse_time_of_day("no") is None
+
+
+def test_saying_no_is_recognised_without_the_llm() -> None:
+    assert reminders.says_no("no") is True
+    assert reminders.says_no("No, gracias") is True
+    assert reminders.says_no("sin aviso") is True
+    assert reminders.says_no("a las 7") is False

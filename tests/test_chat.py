@@ -482,3 +482,45 @@ async def test_removing_a_single_candidate_asks_yes_or_no() -> None:
     assert reply.candidates is None
     assert reply.edit is not None and reply.edit["reminder_id"] == saved.pk
     assert "¿Quito" in reply.text
+
+
+# --- Fase 10.1: lo que se repite cada semana --------------------------------------------------
+
+
+async def test_a_weekly_activity_is_understood_instead_of_unknown() -> None:
+    """«Todos los viernes tiene natación» no cabía en ninguna acción y moría en «unknown»."""
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_recurring", text="natación", weekdays=[5]),
+        today=MON,
+        chat_id=-4242,
+    )
+
+    assert reply.edit is not None
+    assert reply.edit["action"] == "add_recurring"
+    assert reply.edit["weekdays"] == "5"
+    assert "natación" in reply.text and "viernes" in reply.text
+    # Nada guardado hasta el ✅.
+    assert await repo.active_schedules(TENANT.child_id) == []
+
+
+async def test_a_recurring_without_days_asks_which_ones() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_recurring", text="natación"),
+        today=MON,
+        chat_id=1,
+    )
+    assert reply.edit is None
+    assert "días" in reply.text
+
+
+async def test_a_recurring_without_text_asks_what() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="add_recurring", weekdays=[5]),
+        today=MON,
+        chat_id=1,
+    )
+    assert reply.edit is None
+    assert "apunto" in reply.text.lower()

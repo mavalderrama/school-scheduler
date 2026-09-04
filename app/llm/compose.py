@@ -267,6 +267,7 @@ HELP_TEXT = (
     "• «¿qué hay esta semana?»\n"
     "• «agrega que el martes lleva disfraz»\n"
     "• «quita lo del jueves»\n"
+    "• «todos los viernes tiene natación» (se repite cada semana)\n"
     "• «recuérdame todos los días a las 7 que revise la agenda»\n"
     "\n"
     "• «¿cuándo hay natación?»\n"
@@ -399,6 +400,49 @@ def format_applied(dates: list[date], inserted: int, superseded: int) -> str:
     return text
 
 
+def format_weekday_list(weekdays: str) -> str:
+    """`"25"` → «los martes y viernes». Los días vienen como dígitos ISO, igual que en la DB."""
+    names = [WEEKDAYS_ES[int(day) - 1] for day in weekdays]
+    if not names:
+        return ""
+    listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} y {names[-1]}"
+    return f"los {listed}"
+
+
+def format_recurring_question(weekdays: str, text: str) -> str:
+    return (
+        f"🔁 ¿Apunto <b>{html.escape(text)}</b> {format_weekday_list(weekdays)}, todas las semanas?"
+    )
+
+
+def format_recurring_added(weekdays: str, text: str, *, replaced: bool = False) -> str:
+    """Confirmación del alta + la pregunta del aviso, en un solo mensaje.
+
+    Van juntas porque el grafo interrumpe justo después de guardar: si fueran dos mensajes,
+    el primero se perdería (el runner solo manda el valor del `interrupt`).
+    """
+    what = "Actualizado" if replaced else "Guardado"
+    return (
+        f"✅ {what}: <b>{html.escape(text)}</b> {format_weekday_list(weekdays)}, todas las "
+        f"semanas. Lo verás en /hoy, /manana y /semana.\n"
+        f"\n"
+        f"⏰ ¿Te aviso a alguna hora esos días? Dime la hora (por ejemplo «18:30» o «6 de "
+        f"la tarde») o responde «no»."
+    )
+
+
+NO_RECURRING_REMINDER_TEXT = (
+    "👍 Listo, sin aviso. Si luego lo quieres, dime «recuérdame los viernes a las 6 la natación»."
+)
+
+RECURRING_REMINDER_UNCLEAR_TEXT = (
+    "No entendí la hora, así que lo dejo sin aviso (lo recurrente ya está guardado). Si lo "
+    "quieres, dime «recuérdame los viernes a las 6 la natación»."
+)
+
+ASK_RECURRING_DAYS_TEXT = "¿Qué días se repite? Por ejemplo: «todos los viernes tiene natación»."
+
+
 # --- Recordatorios ---------------------------------------------------------------------
 
 
@@ -431,11 +475,8 @@ def describe_schedule(
     if repeat == "once":
         return f"el {format_date_es(on_date)} {at}" if on_date is not None else at
     if repeat == "weekly":
-        names = [WEEKDAYS_ES[int(day) - 1] for day in weekdays]
-        if not names:
-            return at
-        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} y {names[-1]}"
-        return f"los {listed} {at}"
+        listed = format_weekday_list(weekdays)
+        return f"{listed} {at}" if listed else at
     return f"todos los días {at}" + (" que haya colegio" if only_school_days else "")
 
 

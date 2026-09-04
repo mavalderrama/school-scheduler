@@ -3,6 +3,10 @@
 Una foto confirmada se aplica de una de dos formas según su `doc_type`: entradas por
 fecha con merge del día (`agenda`) o una plantilla de horario rotativo que reemplaza a la
 anterior (`schedule`). Las dos versionan en vez de borrar.
+
+Por texto hay tres altas, y la diferencia entre ellas es qué es cada cosa: `add_entry` es
+un día concreto, `add_recurring` es una regla semanal (y por eso acaba en `schedules`, no
+en N entradas con fecha) y el recordatorio, que vive en `reminders`, lo maneja el grafo.
 """
 
 from __future__ import annotations
@@ -13,9 +17,10 @@ from datetime import date
 
 from app.db import repo
 from app.db.models import AgendaEntry, SourceKind, SourceStatus
-from app.llm.schemas import ExtractedEntry, ExtractionResult
+from app.llm.schemas import ExtractedEntry, ExtractionResult, ScheduleDraft, SlotDraft
 from app.log import get_logger
-from app.services import cache
+from app.services import cache, reminders
+from app.services import schedule as schedule_service
 from app.services.scope import Scope
 
 log = get_logger(__name__)
@@ -110,6 +115,67 @@ async def add_entry(
     )
     log.info("entry_added", entry_id=entry.pk, source_id=source.pk, date=entry_date.isoformat())
     return entry
+
+
+@dataclass(frozen=True)
+class RecurringResult:
+    """Lo que hizo un alta recurrente: qué horario quedó y si sustituyó a otro igual."""
+
+    schedule_id: int
+    weekdays: str
+    text: str
+    replaced: bool
+
+
+async def add_recurring(
+    scope: Scope,
+    weekdays: str,
+    text: str,
+    *,
+    today: date,
+    user_id: int | None = None,
+) -> RecurringResult:
+    """Alta de algo que se repite cada semana: «todos los viernes hay natación».
+
+    No es una entrada con fecha (no hay una) ni un recordatorio (no hay hora): es una
+    **regla**, y una regla ya tiene dónde vivir en este proyecto: un horario de ciclo
+    semanal, que convive con el académico igual que el de la jornada extendida. Así sale en
+    /hoy, /manana y la notificación diaria, respeta festivos y no genera N filas que
+    caduquen al agotarse un horizonte inventado.
+
+    Repetir el mismo nombre **reemplaza** al anterior en vez de duplicar la línea del día;
+    lo reemplazado queda versionado, como todo lo demás.
+    """
+    user = await repo.get_user(user_id) if user_id is not None else None
+    name = text[:1].upper() + text[1:]
+    same = [
+        t.pk
+        for t in await repo.active_schedules(scope.child_id, today)
+        if schedule_service.same_subject(t.name, name)
+    ]
+    source = await repo.create_source(
+        SourceKind.TEXT_CORRECTION, child_id=scope.child_id, submitted_by=user
+    )
+    draft = ScheduleDraft(
+        name=name,
+        cycle_weeks=1,
+        anchor_monday=schedule_service.monday_of(today),
+        slots=[
+            SlotDraft(week_label="A", weekday=day, subject=text)
+            for day in reminders.parse_weekdays(weekdays)
+        ],
+    )
+    schedule_id = await repo.apply_schedule(source.pk, draft, valid_from=today, replace_ids=same)
+    log.info(
+        "recurring_added",
+        schedule_id=schedule_id,
+        source_id=source.pk,
+        weekdays=weekdays,
+        replaced=same,
+    )
+    return RecurringResult(
+        schedule_id=schedule_id, weekdays=weekdays, text=text, replaced=bool(same)
+    )
 
 
 async def remove_entry(scope: Scope, entry_id: int, user_id: int | None = None) -> bool:

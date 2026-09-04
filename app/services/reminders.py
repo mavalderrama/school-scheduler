@@ -11,6 +11,7 @@ cambie el huso o el horario de verano. Por eso la ocurrencia se compone siempre 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -32,14 +33,99 @@ MAX_PER_CHILD = 20
 MAX_LOOKAHEAD_DAYS = 366
 
 
+# Cómo se dice «no» a la pregunta de si quieres aviso. Aquí un "no" a secas SÍ cuenta —al
+# revés que en `chat.is_cancel`—: es una pregunta de sí/no y esa es la respuesta natural.
+NO_WORDS = frozenset(
+    {
+        "no",
+        "no gracias",
+        "nada",
+        "ninguna",
+        "ninguno",
+        "asi esta bien",
+        "no hace falta",
+        "no quiero",
+        "sin aviso",
+        "no me avises",
+        "dejalo",
+        "luego",
+        "despues",
+    }
+)
+
+_AM_WORDS = ("de la manana", "am", "a.m", "de la madrugada")
+_PM_WORDS = ("de la tarde", "de la noche", "pm", "p.m")
+
+_TIME_RE = re.compile(r"(?<!\d)(\d{1,2})(?::|\.|\s+y\s+|h)?(\d{2}|media|cuarto)?(?!\d)")
+
+
+def _fold(text: str) -> str:
+    """Minúsculas, sin tildes, sin signos y con los espacios normalizados.
+
+    Los dos puntos y el punto se conservan: son separadores de hora («18:30», «6.30»).
+    """
+    table = str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN", ",;!¡¿?")
+    return " ".join(text.translate(table).lower().split()).strip(". ")
+
+
+def says_no(text: str) -> bool:
+    """¿Están diciendo que no quieren aviso? Se resuelve en Python, sin LLM."""
+    return _fold(text) in NO_WORDS
+
+
+def parse_time_of_day(text: str) -> time | None:
+    """«18:30», «6 de la tarde», «7 y media», «mediodía» → `time`. `None` si no hay hora.
+
+    Determinista y sin LLM a propósito: es la respuesta a una pregunta que el bot acaba de
+    hacer («¿a qué hora?»), y contestarla tiene que funcionar con el proveedor caído. Lo
+    que se entendió se repite en la confirmación, así que una lectura rara se ve y se
+    corrige.
+    """
+    cleaned = _fold(text)
+    if not cleaned or says_no(cleaned):
+        return None
+    if "mediodia" in cleaned:
+        return time(12, 0)
+    if "medianoche" in cleaned:
+        return time(0, 0)
+
+    match = _TIME_RE.search(cleaned)
+    if match is None:
+        return None
+    hour = int(match.group(1))
+    raw_minute = match.group(2)
+    if not raw_minute:
+        minute = 0
+    elif raw_minute == "media":
+        minute = 30
+    elif raw_minute == "cuarto":
+        minute = 15
+    else:
+        minute = int(raw_minute)
+    if hour > 23 or minute > 59:
+        return None
+
+    if hour == 12 and "de la noche" in cleaned:
+        return time(0, minute)  # «las 12 de la noche» es medianoche, no mediodía
+    if any(word in cleaned for word in _PM_WORDS) and hour < 12:
+        hour += 12
+    elif any(word in cleaned for word in _AM_WORDS) and hour == 12:
+        hour = 0
+    return time(hour, minute)
+
+
 def parse_weekdays(value: str) -> list[int]:
     """`"135"` → `[1, 3, 5]` (ISO: 1 lunes … 7 domingo)."""
     return [int(char) for char in value]
 
 
 def format_weekdays(days: list[int]) -> str:
-    """`[3, 1, 1]` → `"13"`. Ordenados y sin repetir, que es como se guardan."""
-    return "".join(str(day) for day in sorted(set(days)))
+    """`[3, 1, 1]` → `"13"`. Ordenados, sin repetir y **solo días ISO válidos**.
+
+    El filtro no es cosmético: los días vienen del LLM y un `8` reventaría más adelante al
+    buscar su nombre o al validar la franja del horario, lejos de aquí.
+    """
+    return "".join(str(day) for day in sorted(set(days)) if 1 <= day <= 7)
 
 
 @dataclass(frozen=True, slots=True)

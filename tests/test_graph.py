@@ -325,3 +325,107 @@ async def test_rejecting_a_reminder_saves_nothing(settings: Settings, clean_thre
         assert resumed is not None and resumed.finished
 
     assert await repo.reminders_of(TENANT.child_id) == []
+
+
+# --- Fase 10.1: alta recurrente y la oferta de aviso ------------------------------------------
+
+
+def recurring_state() -> GraphState:
+    return {
+        "chat_id": CHAT,
+        "child_id": TENANT.child_id,
+        "flow": "edit",
+        "edit": {
+            "edit_id": 90,
+            "chat_id": CHAT,
+            "action": "add_recurring",
+            "weekdays": "5",
+            "text": "natación",
+        },
+        "user_id": None,
+        "queue": [],
+    }
+
+
+async def test_a_recurring_is_saved_and_then_offers_the_reminder(
+    settings: Settings, clean_thread: None
+) -> None:
+    """✅ guarda la regla y **sigue preguntando** si además quiere aviso a una hora."""
+    provider = FakeProvider("claude_sdk", result=schedule_extraction(ANCHOR))
+
+    async for runner in make_runner(settings, provider):
+        turn = await runner.start(CHAT, recurring_state())
+        assert turn.ask is not None and turn.ask.kind == "edit"
+
+        saved = await runner.resume(CHAT, {"action": "confirm", "edit_id": 90})
+        assert saved is not None and saved.ask is not None
+        assert saved.ask.kind == "offer_reminder"
+        # La confirmación del alta viaja en la misma pregunta: si no, se perdería.
+        assert "Guardado" in (saved.ask.text or "") and "viernes" in (saved.ask.text or "")
+
+        # La regla ya está guardada aunque el aviso siga sin decidirse.
+        assert [t.name for t in await repo.active_schedules(TENANT.child_id, today())] == [
+            "Natación"
+        ]
+
+        answered = await runner.resume(CHAT, "a las 6 de la tarde")
+        assert answered is not None and answered.finished
+        assert answered.reply is not None and "Te aviso" in answered.reply
+
+    reminders_saved = await repo.reminders_of(TENANT.child_id)
+    assert len(reminders_saved) == 1
+    assert reminders_saved[0].weekdays == "5"
+    assert reminders_saved[0].repeat == "weekly"
+    assert reminders_saved[0].only_school_days is True
+    assert reminders_saved[0].text == "natación"
+
+
+async def test_saying_no_to_the_offer_keeps_the_recurring(
+    settings: Settings, clean_thread: None
+) -> None:
+    """«No» aquí es «sin aviso», nunca deshacer lo que ya se guardó."""
+    provider = FakeProvider("claude_sdk", result=schedule_extraction(ANCHOR))
+
+    async for runner in make_runner(settings, provider):
+        await runner.start(CHAT, recurring_state())
+        await runner.resume(CHAT, {"action": "confirm", "edit_id": 90})
+        done = await runner.resume(CHAT, "no")
+        assert done is not None and done.finished
+        assert done.reply is not None and "sin aviso" in done.reply
+
+    assert await repo.reminders_of(TENANT.child_id) == []
+    assert [t.name for t in await repo.active_schedules(TENANT.child_id, today())] == ["Natación"]
+
+
+async def test_the_offer_survives_a_restart(settings: Settings, clean_thread: None) -> None:
+    """La pregunta del aviso es estado como cualquier otro: no se pierde al reiniciar."""
+    provider = FakeProvider("claude_sdk", result=schedule_extraction(ANCHOR))
+
+    async for runner in make_runner(settings, provider):
+        await runner.start(CHAT, recurring_state())
+        turn = await runner.resume(CHAT, {"action": "confirm", "edit_id": 90})
+        assert turn is not None and turn.ask is not None
+
+    # --- REINICIO ---
+    async for runner in make_runner(settings, provider):
+        assert await runner.is_waiting(CHAT) is True
+        answered = await runner.resume(CHAT, "18:30")
+        assert answered is not None and answered.finished
+        assert answered.reply is not None and "18:30" in answered.reply
+
+    assert len(await repo.reminders_of(TENANT.child_id)) == 1
+
+
+async def test_an_answer_that_is_not_an_hour_does_not_invent_one(
+    settings: Settings, clean_thread: None
+) -> None:
+    provider = FakeProvider("claude_sdk", result=schedule_extraction(ANCHOR))
+
+    async for runner in make_runner(settings, provider):
+        await runner.start(CHAT, recurring_state())
+        await runner.resume(CHAT, {"action": "confirm", "edit_id": 90})
+        done = await runner.resume(CHAT, "pues no sé, cuando toque")
+        assert done is not None and done.finished
+        assert done.reply is not None and "No entendí la hora" in done.reply
+
+    assert await repo.reminders_of(TENANT.child_id) == []

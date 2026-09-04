@@ -174,6 +174,11 @@ async def cmd_pendiente(message: Message, runner: GraphRunner) -> None:
     if ask.kind == "edit":
         await message.answer("✍️ Hay un cambio pendiente de confirmar.")
         return
+    if ask.kind == "offer_reminder":
+        await message.answer(
+            "⏰ Te pregunté si quieres aviso a alguna hora:\n\n" + (ask.text or "")
+        )
+        return
     await message.answer("📷 Hay una lectura pendiente de confirmar:\n\n" + (ask.text or ""))
 
 

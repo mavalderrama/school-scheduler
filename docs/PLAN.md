@@ -463,6 +463,7 @@ Recibe las entradas ya consultadas de la DB y produce un texto corto en español
 
 - `add_entry` y `remove_entry` también pasan por confirmación con inline keyboard ("¿Agrego 'disfraz' para el martes 8? ✅/❌").
 - `remove_entry`: buscar candidatos activos en la fecha o con `target_entry_hint` por `ILIKE`; si hay más de uno, botones para elegir.
+- `add_recurring` (Fase 10.1): «todos los viernes tiene natación» no tiene fecha ni hora, así que no es ni `add_entry` ni `add_reminder`. Es una **regla**, y se guarda como un horario de ciclo semanal (`schedules` + `schedule_slots`, `cycle_weeks=1`) que convive con el académico; repetir el mismo nombre lo reemplaza en vez de duplicar la línea del día. Tras el ✅ el bot ofrece además el aviso a una hora; la hora de esa respuesta se interpreta en Python, sin LLM.
 
 ### 7.3 Notificación diaria (19:00 America/Bogota)
 1. `target = hoy + 1`. **Si `target` no es día lectivo** —fin de semana, festivo nacional o día sin colegio cargado en `calendar_exceptions`— no se envía nada esa tarde (`SKIP_WEEKEND=true`). La notificación recuerda el próximo día de clase la tarde anterior: si el lunes es festivo, el domingo no suena y el aviso sale el lunes por la noche, sobre el martes.

@@ -13,6 +13,7 @@ from aiogram.types import InlineKeyboardMarkup
 from app.bot.keyboards import (
     confirmation_keyboard,
     edit_keyboard,
+    no_reminder_keyboard,
     question_keyboard,
     schedule_keyboard,
 )
@@ -33,6 +34,8 @@ def keyboard_for(ask: Ask) -> InlineKeyboardMarkup | None:
         return confirmation_keyboard(ask.source_id)
     if ask.kind == "edit" and ask.edit is not None:
         return edit_keyboard(int(ask.edit.get("edit_id", 0)))
+    if ask.kind == "offer_reminder" and ask.edit is not None:
+        return no_reminder_keyboard(int(ask.edit.get("edit_id", 0)))
     return None
 
 

@@ -34,6 +34,7 @@ ASK = "ask"
 SUMMARY = "summary"
 CORRECTION = "correction"
 EDIT = "edit"
+OFFER_REMINDER = "offer_reminder"
 
 
 async def _scope(state: GraphState) -> scope_service.Scope:
@@ -282,6 +283,8 @@ async def apply_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dict[
         return await _apply_add(sc, edit, user_id)
     if action == "remove":
         return await _apply_remove(sc, edit, chosen, user_id)
+    if action == "add_recurring":
+        return await _apply_add_recurring(sc, edit, user_id)
     if action == "add_reminder":
         return await _apply_add_reminder(sc, edit, state, user_id)
     if action == "remove_reminder":
@@ -314,6 +317,74 @@ async def _apply_remove(
         return {"reply": "Esa entrada ya no está vigente."}
     await agenda.remove_entry(sc, found.pk, user_id)
     return {"reply": compose.format_removed(found)}
+
+
+async def _apply_add_recurring(
+    sc: scope_service.Scope, edit: dict[str, Any], user_id: int | None
+) -> dict[str, Any]:
+    """Guarda la regla semanal y deja abierta la oferta de aviso.
+
+    El texto que se devuelve incluye ya la pregunta del aviso porque el nodo siguiente
+    interrumpe: el runner solo manda el valor del `interrupt`, así que un `reply` suelto
+    aquí no llegaría a verse.
+    """
+    weekdays = str(edit.get("weekdays") or "")
+    text = str(edit.get("text") or "")
+    if not weekdays or not text:
+        return {"reply": "No sé qué apuntar. Vuelve a pedírmelo, por favor."}
+    today = datetime.now(sc.zoneinfo).date()
+    result = await agenda.add_recurring(sc, weekdays, text, today=today, user_id=user_id)
+    return {
+        "reply": compose.format_recurring_added(weekdays, text, replaced=result.replaced),
+        "reminder_offer": {
+            "edit_id": edit.get("edit_id"),
+            "chat_id": edit.get("chat_id"),
+            "weekdays": weekdays,
+            "text": text,
+        },
+    }
+
+
+async def offer_reminder(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str, Any]:
+    """Tras guardar una regla semanal: «¿te aviso a alguna hora esos días?».
+
+    La hora se interpreta **en Python** (`reminders.parse_time_of_day`), no con el LLM:
+    responder a una pregunta que el bot acaba de hacer tiene que funcionar también con el
+    proveedor caído, igual que salir del interrogatorio. Lo entendido se repite en la
+    confirmación, así que una lectura rara se ve.
+    """
+    offer = state.get("reminder_offer") or {}
+    answer = interrupt(
+        {
+            "kind": OFFER_REMINDER,
+            "text": state.get("reply") or "",
+            "edit": {"edit_id": offer.get("edit_id") or 0},
+        }
+    )
+    # Un dict es un botón (❌ Sin aviso, o /cancelar): la regla ya está guardada, así que
+    # rechazar aquí solo significa «sin aviso», nunca deshacerla.
+    if isinstance(answer, dict) or reminders.says_no(str(answer)):
+        return {"reply": compose.NO_RECURRING_REMINDER_TEXT, "reminder_offer": None}
+
+    moment = reminders.parse_time_of_day(str(answer))
+    if moment is None:
+        return {"reply": compose.RECURRING_REMINDER_UNCLEAR_TEXT, "reminder_offer": None}
+
+    sc = await _scope(state)
+    edit = {
+        "edit_id": offer.get("edit_id"),
+        "chat_id": offer.get("chat_id") or state.get("chat_id"),
+        "action": "add_reminder",
+        "text": str(offer.get("text") or ""),
+        "time_of_day": compose.format_hhmm(moment),
+        "repeat": "weekly",
+        "weekdays": str(offer.get("weekdays") or ""),
+        "on_date": None,
+        # Es una actividad del colegio: en un festivo no hace falta el aviso.
+        "only_school_days": True,
+    }
+    result = await _apply_add_reminder(sc, edit, state, state.get("user_id"))
+    return {**result, "reminder_offer": None}
 
 
 async def _apply_add_reminder(

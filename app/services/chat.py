@@ -254,6 +254,29 @@ async def prepare_add(intent: Intent, today: date, chat_id: int) -> ChatReply:
     return ChatReply(text=compose.format_add_question(intent.date_from, kind, text), edit=edit)
 
 
+async def prepare_recurring(intent: Intent, chat_id: int) -> ChatReply:
+    """«Todos los viernes tiene natación»: una regla semanal, no una entrada con fecha.
+
+    Antes esto no tenía dónde caer —`add_entry` exige una fecha y `add_reminder` una hora—,
+    así que el clasificador lo mandaba a `unknown` y el bot contestaba «no te entendí» a
+    una frase perfectamente clara.
+    """
+    text = (intent.text or "").strip()
+    if not text:
+        return ChatReply(text="¿Qué apunto? Por ejemplo: «todos los viernes tiene natación».")
+    weekdays = reminders.format_weekdays(intent.weekdays or [])
+    if not weekdays:
+        return ChatReply(text=compose.ASK_RECURRING_DAYS_TEXT)
+    edit: dict[str, Any] = {
+        "edit_id": _new_edit_id(),
+        "chat_id": chat_id,
+        "action": "add_recurring",
+        "weekdays": weekdays,
+        "text": text,
+    }
+    return ChatReply(text=compose.format_recurring_question(weekdays, text), edit=edit)
+
+
 async def prepare_remove(scope: Scope, intent: Intent, today: date, chat_id: int) -> ChatReply:
     date_from = intent.date_from or today
     date_to = intent.date_to or date_from
@@ -388,6 +411,8 @@ async def dispatch(scope: Scope, intent: Intent, *, today: date, chat_id: int) -
         return await query_subject(scope, intent, today)
     if intent.action == "add_entry":
         return await prepare_add(intent, today, chat_id)
+    if intent.action == "add_recurring":
+        return await prepare_recurring(intent, chat_id)
     if intent.action == "remove_entry":
         return await prepare_remove(scope, intent, today, chat_id)
     if intent.action == "add_reminder":

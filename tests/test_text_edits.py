@@ -9,8 +9,9 @@ import pytest
 from app.db import repo
 from app.db.models import SourceKind, SourceStatus
 from app.graph import nodes
-from app.llm.schemas import ExtractedEntry, ExtractionResult
+from app.llm.schemas import ExtractedEntry, ExtractionResult, ScheduleDraft, SlotDraft
 from app.services import agenda, reminders, scope
+from app.services import schedule as schedule_service
 from app.services.scope import Scope
 from tests.conftest import TENANT, make_child
 
@@ -239,3 +240,63 @@ async def test_the_cap_per_child_is_enforced() -> None:
 async def test_an_unknown_action_is_answered_not_guessed() -> None:
     """Con cuatro acciones, el `else` de antes habría borrado una entrada de agenda."""
     assert "No sé qué hacer" in await apply_edit({"edit_id": 14, "chat_id": 1, "action": "vete"})
+
+
+# --- Fase 10.1: lo que se repite cada semana --------------------------------------------------
+
+
+async def test_a_recurring_becomes_a_weekly_schedule() -> None:
+    """No son N entradas con fecha: es una regla, y vive donde viven las reglas."""
+    today = date.today()
+    result = await agenda.add_recurring(await a_scope(), "5", "natación", today=today)
+
+    assert result.replaced is False
+    templates = await repo.active_schedules(TENANT.child_id, today)
+    assert [t.name for t in templates] == ["Natación"]
+    assert templates[0].cycle_weeks == 1  # semanal, no rotativo A/B
+    assert templates[0].anchor_monday.isoweekday() == 1
+    assert templates[0].valid_from == today
+
+    slots = (await repo.slots_for_schedules([templates[0].pk]))[templates[0].pk]
+    assert [(s.weekday, s.subject) for s in slots] == [(5, "natación")]
+
+    # Y se ve donde se pregunta por una materia, que es lo que se buscaba.
+    found = await schedule_service.find_subject(await a_scope(), "natacion", today, count=1)
+    assert found and found[0].day.isoweekday() == 5
+
+
+async def test_repeating_the_same_recurring_replaces_it_instead_of_duplicating() -> None:
+    """Si no, el viernes saldría «Natación» dos veces y no habría forma de quitar una."""
+    today = date.today()
+    scope_ = await a_scope()
+    first = await agenda.add_recurring(scope_, "5", "natación", today=today)
+    second = await agenda.add_recurring(scope_, "24", "Natación", today=today)
+
+    assert second.replaced is True
+    templates = await repo.active_schedules(TENANT.child_id, today)
+    assert [t.name for t in templates] == ["Natación"]
+    # El anterior queda fuera de las vigentes, versionado y no borrado.
+    assert templates[0].pk != first.schedule_id
+    slots = (await repo.slots_for_schedules([templates[0].pk]))[templates[0].pk]
+    assert sorted(s.weekday for s in slots) == [2, 4]
+
+
+async def test_a_recurring_does_not_touch_the_academic_schedule() -> None:
+    """El horario del colegio y el extra conviven: reemplazar de más ya fue un bug real."""
+    today = date.today()
+    source = await repo.create_source(SourceKind.PHOTO, child_id=TENANT.child_id)
+    await repo.apply_schedule(
+        source.pk,
+        ScheduleDraft(
+            name="Horario K4A",
+            cycle_weeks=2,
+            anchor_monday=today - timedelta(days=today.weekday()),
+            slots=[SlotDraft(week_label="A", weekday=1, subject="Música")],
+        ),
+        valid_from=today,
+    )
+
+    await agenda.add_recurring(await a_scope(), "5", "natación", today=today)
+
+    names = [t.name for t in await repo.active_schedules(TENANT.child_id, today)]
+    assert sorted(names) == ["Horario K4A", "Natación"]

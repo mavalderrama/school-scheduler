@@ -76,6 +76,7 @@ async def on_text(
             has_pending=False,
             settings=settings,
             providers=providers,
+            family_id=sc.family_id,
         )
     except LLMError as exc:
         log.warning("intent_failed", chat_id=chat_id, error=str(exc))

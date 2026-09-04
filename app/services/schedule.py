@@ -161,6 +161,11 @@ def _label_for(index: int, slots: Sequence[ScheduleSlot]) -> str | None:
     return next((s.week_label for s in slots if s.week_index == index), None)
 
 
+def same_subject(one: str, other: str) -> bool:
+    """¿Son el mismo nombre? Sin tildes ni mayúsculas: «Natación» y «natacion» lo son."""
+    return _normalize(one) == _normalize(other)
+
+
 def _normalize(text: str) -> str:
     """Minúsculas y sin tildes, para comparar «Natación» con «natacion»."""
     table = str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN")

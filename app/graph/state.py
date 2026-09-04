@@ -64,6 +64,8 @@ class GraphState(TypedDict, total=False):
     # --- Flujo de alta/baja por texto ---
     edit: dict[str, Any] | None
     user_id: int | None
+    reminder_offer: dict[str, Any] | None
+    """Alta recurrente ya guardada que espera respuesta a «¿te aviso a alguna hora?»."""
 
     # --- Común ---
     queue: list[dict[str, Any]]

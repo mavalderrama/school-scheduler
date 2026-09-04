@@ -73,6 +73,11 @@ def route_edit(state: GraphState) -> Literal["apply_edit", "finish"]:
     return "apply_edit" if action == "confirm" else "finish"
 
 
+def route_after_apply_edit(state: GraphState) -> Literal["offer_reminder", "finish"]:
+    """Un alta recurrente sigue con la oferta de aviso; el resto termina aquí."""
+    return "offer_reminder" if state.get("reminder_offer") else "finish"
+
+
 def route_start(state: GraphState) -> Literal["extract", "present_edit"]:
     return "present_edit" if state.get("flow") == "edit" else "extract"
 
@@ -99,6 +104,7 @@ def build_graph() -> StateGraph[GraphState, GraphContext, GraphState, GraphState
     builder.add_node("reject_photo", nodes.reject_photo)
     builder.add_node("present_edit", nodes.present_edit)
     builder.add_node("apply_edit", nodes.apply_edit)
+    builder.add_node("offer_reminder", nodes.offer_reminder)
     builder.add_node("finish", finish)
 
     builder.add_conditional_edges(START, route_start)
@@ -111,7 +117,8 @@ def build_graph() -> StateGraph[GraphState, GraphContext, GraphState, GraphState
     builder.add_conditional_edges("present_edit", route_edit)
     builder.add_edge("apply_photo", "finish")
     builder.add_edge("reject_photo", "finish")
-    builder.add_edge("apply_edit", "finish")
+    builder.add_conditional_edges("apply_edit", route_after_apply_edit)
+    builder.add_edge("offer_reminder", "finish")
     builder.add_edge("finish", END)
     return builder
 
