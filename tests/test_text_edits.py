@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import pytest
 
 from app.db import repo
-from app.db.models import SourceKind, SourceStatus
+from app.db.models import ScheduleSlot, ScheduleTemplate, SourceKind, SourceStatus
 from app.graph import nodes
 from app.llm.schemas import ExtractedEntry, ExtractionResult, ScheduleDraft, SlotDraft
 from app.services import agenda, reminders, scope
@@ -300,3 +300,162 @@ async def test_a_recurring_does_not_touch_the_academic_schedule() -> None:
 
     names = [t.name for t in await repo.active_schedules(TENANT.child_id, today)]
     assert sorted(names) == ["Horario K4A", "Natación"]
+
+
+# --- Fase 10.2: quitar una regla y cambiar una franja ------------------------------------------
+
+
+K4A_SLOTS = (("A", 2, "Música"), ("A", 4, "Artes"), ("B", 2, "Deporte"))
+
+
+async def seed_schedule(
+    name: str = "Horario K4A", cycle: int = 2, child_id: int | None = None
+) -> int:
+    """`child_id` se resuelve dentro: `TENANT` lo rellena un fixture, no el import."""
+    today = date.today()
+    source = await repo.create_source(
+        SourceKind.PHOTO, child_id=child_id if child_id is not None else TENANT.child_id
+    )
+    return await repo.apply_schedule(
+        source.pk,
+        ScheduleDraft(
+            name=name,
+            cycle_weeks=cycle,
+            anchor_monday=today - timedelta(days=today.weekday()),
+            slots=[
+                SlotDraft(week_label=w, weekday=d, rotation="7", subject=subj)
+                for w, d, subj in K4A_SLOTS
+            ],
+        ),
+        valid_from=today,
+    )
+
+
+async def slot_named(schedule_id: int, subject: str) -> int:
+    slots = await repo.schedule_slots(schedule_id)
+    return next(s.pk for s in slots if s.subject == subject)
+
+
+async def test_removing_a_schedule_versions_it_instead_of_deleting() -> None:
+    schedule_id = await seed_schedule()
+    edit = {"edit_id": 20, "chat_id": 1, "action": "remove_recurring", "schedule_id": schedule_id}
+
+    assert "Quitado el horario" in await apply_edit(edit)
+
+    assert await repo.active_schedules(TENANT.child_id, date.today()) == []
+    # Las franjas siguen ahí: el pasado no se reescribe.
+    assert len(await repo.schedule_slots(schedule_id)) == len(K4A_SLOTS)
+
+
+async def test_removing_a_schedule_twice_is_harmless() -> None:
+    schedule_id = await seed_schedule()
+    edit = {"edit_id": 21, "chat_id": 1, "action": "remove_recurring", "schedule_id": schedule_id}
+    await apply_edit(edit)
+    assert "ya no está vigente" in await apply_edit(edit)
+
+
+async def test_removing_a_schedule_of_another_family_does_nothing() -> None:
+    other = await make_child("Otra", chat_id=-777030)
+    theirs = await seed_schedule(name="Suyo", child_id=other.pk)
+
+    edit = {"edit_id": 22, "chat_id": 1, "action": "remove_recurring", "schedule_id": theirs}
+    assert "ya no está vigente" in await apply_edit(edit)
+
+    assert [t.name for t in await repo.active_schedules(other.pk, date.today())] == ["Suyo"]
+
+
+async def test_changing_a_slot_clones_the_template_with_everything_else_intact() -> None:
+    """No es un UPDATE: nace una plantilla nueva y la vieja queda cerrada."""
+    schedule_id = await seed_schedule()
+    target = await slot_named(schedule_id, "Deporte")
+    await ScheduleSlot.objects.filter(pk=target).aupdate(note="traer toalla")
+
+    reply = await apply_edit(
+        {"edit_id": 23, "chat_id": 1, "action": "edit_slot", "slot_id": target, "text": "evento"}
+    )
+    assert "Cambiado" in reply and "Deporte" in reply and "evento" in reply
+
+    active = await repo.active_schedules(TENANT.child_id, date.today())
+    assert len(active) == 1 and active[0].pk != schedule_id
+    assert (active[0].name, active[0].cycle_weeks) == ("Horario K4A", 2)
+
+    slots = await repo.schedule_slots(active[0].pk)
+    assert sorted((s.week_label, s.weekday, s.subject) for s in slots) == [
+        ("A", 2, "Música"),
+        ("A", 4, "Artes"),
+        ("B", 2, "evento"),
+    ]
+    # Se copia la fila entera: `rotation` y `note` no caben en un ScheduleDraft.
+    changed = next(s for s in slots if s.weekday == 2 and s.week_label == "B")
+    assert (changed.rotation, changed.note) == ("7", "traer toalla")
+
+
+async def test_changing_a_slot_leaves_the_old_template_closed_but_readable() -> None:
+    schedule_id = await seed_schedule()
+    await apply_edit(
+        {
+            "edit_id": 24,
+            "chat_id": 1,
+            "action": "edit_slot",
+            "slot_id": await slot_named(schedule_id, "Música"),
+            "text": "evento",
+        }
+    )
+    old = await ScheduleTemplate.objects.aget(pk=schedule_id)
+    assert old.is_active is False
+    assert old.superseded_by_id is not None
+    assert old.valid_to is not None and old.valid_to >= old.valid_from
+
+
+async def test_changing_a_slot_to_what_it_already_says_does_not_version() -> None:
+    schedule_id = await seed_schedule()
+    reply = await apply_edit(
+        {
+            "edit_id": 25,
+            "chat_id": 1,
+            "action": "edit_slot",
+            "slot_id": await slot_named(schedule_id, "Música"),
+            "text": "música",
+        }
+    )
+    assert "Ya dice eso" in reply
+    assert [t.pk for t in await repo.active_schedules(TENANT.child_id, date.today())] == [
+        schedule_id
+    ]
+
+
+async def test_changing_a_slot_of_another_family_does_nothing() -> None:
+    other = await make_child("Otra", chat_id=-777031)
+    theirs = await seed_schedule(name="Suyo", child_id=other.pk)
+    target = await slot_named(theirs, "Música")
+
+    edit = {"edit_id": 26, "chat_id": 1, "action": "edit_slot", "slot_id": target, "text": "otra"}
+    assert "ya no está vigente" in await apply_edit(edit)
+
+    slots = await repo.schedule_slots(theirs)
+    assert sorted(s.subject for s in slots) == ["Artes", "Deporte", "Música"]
+
+
+async def test_choosing_a_candidate_carries_the_id_from_the_button() -> None:
+    """Con varias franjas el `edit` no lleva id: lo pone el botón, y hay que hacerle caso."""
+    schedule_id = await seed_schedule()
+    chosen = await slot_named(schedule_id, "Deporte")
+
+    reply = await apply_edit(
+        {"edit_id": 27, "chat_id": 1, "action": "edit_slot", "text": "evento"}, chosen
+    )
+    assert "Cambiado" in reply and "Deporte" in reply
+
+    active = await repo.active_schedules(TENANT.child_id, date.today())
+    slots = await repo.schedule_slots(active[0].pk)
+    assert next(s.subject for s in slots if s.week_label == "B") == "evento"
+
+
+async def test_choosing_which_schedule_to_remove_comes_from_the_button() -> None:
+    keep = await seed_schedule("Horario K4A")
+    drop = await seed_schedule("Natación", cycle=1)
+
+    reply = await apply_edit({"edit_id": 28, "chat_id": 1, "action": "remove_recurring"}, drop)
+    assert "Natación" in reply
+
+    assert [t.pk for t in await repo.active_schedules(TENANT.child_id, date.today())] == [keep]

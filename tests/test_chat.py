@@ -11,7 +11,14 @@ from app.config import Settings
 from app.db import repo
 from app.db.models import SourceKind
 from app.llm.provider import LLMUnavailableError
-from app.llm.schemas import ChatTurn, ExtractedEntry, ExtractionResult, Intent
+from app.llm.schemas import (
+    ChatTurn,
+    ExtractedEntry,
+    ExtractionResult,
+    Intent,
+    ScheduleDraft,
+    SlotDraft,
+)
 from app.services import agenda, chat, scope
 from app.services.scope import Scope
 from tests.conftest import TENANT
@@ -524,3 +531,141 @@ async def test_a_recurring_without_text_asks_what() -> None:
     )
     assert reply.edit is None
     assert "apunto" in reply.text.lower()
+
+
+# --- Fase 10.2: quitar un horario y cambiar una franja, hablando ------------------------------
+
+
+async def seed_ab_schedule(name: str = "Horario K4A", cycle: int = 2) -> int:
+    """Un horario A/B vigente desde hoy, con dos materias el martes."""
+    today = date.today()
+    source = await repo.create_source(SourceKind.PHOTO, child_id=TENANT.child_id)
+    return await repo.apply_schedule(
+        source.pk,
+        ScheduleDraft(
+            name=name,
+            cycle_weeks=cycle,
+            anchor_monday=today - timedelta(days=today.weekday()),
+            slots=[
+                SlotDraft(week_label="A", weekday=2, subject="Música"),
+                SlotDraft(week_label="B", weekday=2, subject="Deporte"),
+            ],
+        ),
+        valid_from=today,
+    )
+
+
+async def test_removing_the_only_schedule_asks_for_confirmation() -> None:
+    schedule_id = await seed_ab_schedule()
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="remove_recurring", target_entry_hint="el horario"),
+        today=date.today(),
+        chat_id=1,
+    )
+
+    assert reply.edit is not None
+    assert reply.edit["action"] == "remove_recurring"
+    assert reply.edit["schedule_id"] == schedule_id
+    # Sigue vigente: nada se toca hasta el ✅.
+    assert len(await repo.active_schedules(TENANT.child_id, date.today())) == 1
+
+
+async def test_removing_with_several_schedules_offers_the_names() -> None:
+    await seed_ab_schedule("Horario K4A")
+    await seed_ab_schedule("Natación", cycle=1)
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="remove_recurring", target_entry_hint="lo que sea"),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert reply.candidates is not None
+    assert sorted(label for _, label in reply.candidates) == ["Horario K4A", "Natación"]
+
+
+async def test_removing_by_name_goes_straight_to_the_right_one() -> None:
+    await seed_ab_schedule("Horario K4A")
+    swim = await seed_ab_schedule("Natación", cycle=1)
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="remove_recurring", target_entry_hint="natación"),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert reply.edit is not None and reply.edit["schedule_id"] == swim
+    assert reply.candidates is None
+
+
+async def test_without_any_schedule_there_is_nothing_to_remove() -> None:
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="remove_recurring", target_entry_hint="natación"),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert reply.edit is None
+    assert "horario cargado" in reply.text
+
+
+async def test_changing_a_slot_picks_the_week_that_was_named() -> None:
+    """«El martes de la Semana B»: el día solo no basta, hay dos martes en el ciclo."""
+    schedule_id = await seed_ab_schedule()
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="edit_slot", weekdays=[2], week_label="B", text="evento"),
+        today=date.today(),
+        chat_id=1,
+    )
+
+    assert reply.edit is not None and reply.candidates is None
+    assert reply.edit["action"] == "edit_slot" and reply.edit["text"] == "evento"
+    assert "Deporte" in reply.text and "Semana B" in reply.text
+
+    slots = await repo.schedule_slots(schedule_id)
+    assert reply.edit["slot_id"] == next(s.pk for s in slots if s.subject == "Deporte")
+
+
+async def test_changing_a_slot_without_the_week_offers_both() -> None:
+    await seed_ab_schedule()
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="edit_slot", weekdays=[2], text="evento"),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert reply.candidates is not None and len(reply.candidates) == 2
+    assert all("martes" in label for _, label in reply.candidates)
+
+
+async def test_changing_a_slot_needs_a_day_and_a_subject() -> None:
+    await seed_ab_schedule()
+    no_day = await chat.dispatch(
+        await a_scope(),
+        Intent(action="edit_slot", text="evento"),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert no_day.edit is None and "día" in no_day.text
+
+    no_subject = await chat.dispatch(
+        await a_scope(),
+        Intent(action="edit_slot", weekdays=[2]),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert no_subject.edit is None and "materia" in no_subject.text
+
+
+async def test_a_day_with_no_slot_is_said_not_invented() -> None:
+    await seed_ab_schedule()
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="edit_slot", weekdays=[5], text="evento"),
+        today=date.today(),
+        chat_id=1,
+    )
+    assert reply.edit is None
+    assert "No encontré esa franja" in reply.text

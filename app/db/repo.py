@@ -796,10 +796,7 @@ def _apply_schedule(
             for old in ScheduleTemplate.objects.select_for_update().filter(
                 pk__in=replace_ids, child_id=source.child_id, is_active=True
             ):
-                old.is_active = False
-                old.superseded_by = source
-                old.valid_to = max(valid_from - timedelta(days=1), old.valid_from)
-                old.save(update_fields=["is_active", "superseded_by", "valid_to"])
+                _close_schedule(old, source, valid_from)
         labels = _week_labels(draft)
         template = ScheduleTemplate.objects.create(
             child_id=source.child_id,
@@ -868,6 +865,108 @@ async def active_schedule(child_id: int, day: date | None = None) -> ScheduleTem
     """La primera plantilla vigente. Usar `active_schedules` salvo que baste con saber si hay."""
     schedules = await active_schedules(child_id, day)
     return schedules[0] if schedules else None
+
+
+def _close_schedule(old: ScheduleTemplate, source: Source, valid_from: date) -> None:
+    """Retira una plantilla sin borrarla: versionada y con su periodo cerrado.
+
+    `valid_to` nunca queda antes de su propio `valid_from` —reemplazar el mismo día en que
+    se creó dejaba una fila incoherente, y hay un CHECK que lo prohíbe—.
+    """
+    old.is_active = False
+    old.superseded_by = source
+    old.valid_to = max(valid_from - timedelta(days=1), old.valid_from)
+    old.save(update_fields=["is_active", "superseded_by", "valid_to"])
+
+
+def _deactivate_schedule(source_id: int, schedule_id: int, *, valid_from: date) -> str | None:
+    """Quita un horario vigente. Devuelve su nombre, o None si no era de este niño.
+
+    El id llega de un botón, así que se acota al niño de la source: sin eso, un callback
+    manipulado retiraría el horario de otra familia.
+    """
+    with transaction.atomic():
+        source = Source.objects.select_for_update().get(pk=source_id)
+        old = (
+            ScheduleTemplate.objects.select_for_update()
+            .filter(pk=schedule_id, child_id=source.child_id, is_active=True)
+            .first()
+        )
+        if old is None:
+            return None
+        _close_schedule(old, source, valid_from)
+        source.status = SourceStatus.CONFIRMED
+        source.save(update_fields=["status"])
+        return old.name
+
+
+async def deactivate_schedule(source_id: int, schedule_id: int, *, valid_from: date) -> str | None:
+    return await sync_to_async(_deactivate_schedule)(source_id, schedule_id, valid_from=valid_from)
+
+
+def _apply_slot_change(
+    source_id: int, slot_id: int, subject: str, *, valid_from: date
+) -> int | None:
+    """Cambia la materia de **una** franja clonando la plantilla entera.
+
+    No es un `UPDATE` a propósito: aquí nada se edita en sitio. La plantilla nueva nace con
+    todas las franjas copiadas —incluidas `rotation` y `note`, que un `ScheduleDraft` no
+    sabría llevar— y la vieja queda `is_active=false` con `superseded_by`. Así el pasado
+    sigue diciendo lo que decía y el cambio tiene fecha.
+
+    Devuelve el id de la plantilla nueva, o None si la franja no era de este niño.
+    """
+    with transaction.atomic():
+        source = Source.objects.select_for_update().get(pk=source_id)
+        target = (
+            ScheduleSlot.objects.select_related("schedule")
+            .filter(
+                pk=slot_id,
+                schedule__child_id=source.child_id,
+                schedule__is_active=True,
+            )
+            .first()
+        )
+        if target is None:
+            return None
+        old = ScheduleTemplate.objects.select_for_update().get(pk=target.schedule_id)
+        slots = list(
+            ScheduleSlot.objects.filter(schedule_id=old.pk).order_by("week_index", "weekday", "id")
+        )
+        template = ScheduleTemplate.objects.create(
+            child_id=old.child_id,
+            name=old.name,
+            anchor_monday=old.anchor_monday,
+            cycle_weeks=old.cycle_weeks,
+            valid_from=valid_from,
+            source=source,
+        )
+        ScheduleSlot.objects.bulk_create(
+            [
+                ScheduleSlot(
+                    schedule=template,
+                    week_index=slot.week_index,
+                    week_label=slot.week_label,
+                    weekday=slot.weekday,
+                    rotation=slot.rotation,
+                    subject=subject if slot.pk == slot_id else slot.subject,
+                    note=slot.note,
+                )
+                for slot in slots
+            ]
+        )
+        _close_schedule(old, source, valid_from)
+        source.status = SourceStatus.CONFIRMED
+        source.save(update_fields=["status"])
+        return template.pk
+
+
+async def apply_slot_change(
+    source_id: int, slot_id: int, subject: str, *, valid_from: date
+) -> int | None:
+    return await sync_to_async(_apply_slot_change)(
+        source_id, slot_id, subject, valid_from=valid_from
+    )
 
 
 async def slots_for_schedules(schedule_ids: Sequence[int]) -> dict[int, list[ScheduleSlot]]:

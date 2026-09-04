@@ -318,6 +318,124 @@ async def prepare_remove(scope: Scope, intent: Intent, today: date, chat_id: int
     )
 
 
+# --- Horario: quitar una regla y cambiar una franja ------------------------------------
+
+
+def _fold(text: str) -> str:
+    return " ".join(_strip_accents(text).lower().split())
+
+
+async def prepare_remove_recurring(
+    scope: Scope, intent: Intent, today: date, chat_id: int
+) -> ChatReply:
+    """«Quita la natación de los viernes»: retira un horario vigente entero.
+
+    Cierra la asimetría de la 10.1 —se podía añadir una regla pero no quitarla— y sirve
+    igual para un horario que entró por foto. No borra: `is_active=false` con
+    `superseded_by`, como todo lo demás.
+    """
+    templates = await repo.active_schedules(scope.child_id, today)
+    if not templates:
+        return ChatReply(text=compose.NO_SCHEDULE_TEXT)
+
+    hint = _fold(intent.target_entry_hint or intent.text or "")
+    matching = [t for t in templates if hint and hint in _fold(t.name)] if hint else []
+    if not matching:
+        # La pista no casó con ningún nombre: se ofrecen todos, como en las bajas de agenda.
+        matching = templates
+
+    if len(matching) == 1:
+        found = matching[0]
+        return ChatReply(
+            text=compose.format_remove_schedule_question(found.name),
+            edit={
+                "edit_id": _new_edit_id(),
+                "chat_id": chat_id,
+                "action": "remove_recurring",
+                "schedule_id": found.pk,
+            },
+        )
+
+    shortlist = matching[:MAX_CANDIDATES]
+    return ChatReply(
+        text=compose.format_schedule_candidates([t.name for t in shortlist]),
+        edit={"edit_id": _new_edit_id(), "chat_id": chat_id, "action": "remove_recurring"},
+        candidates=[(t.pk, t.name[:60]) for t in shortlist],
+    )
+
+
+async def prepare_edit_slot(scope: Scope, intent: Intent, today: date, chat_id: int) -> ChatReply:
+    """«El martes de la Semana B cámbialo por evento»: una casilla del horario.
+
+    Quién es «esa» casilla lo decide Python cruzando día, etiqueta de semana y una pista
+    de texto contra los horarios vigentes; si queda más de una, elige el usuario con
+    botones. El modelo solo dijo qué día y qué materia nueva.
+    """
+    subject = (intent.text or "").strip()
+    if not subject:
+        return ChatReply(text=compose.ASK_SLOT_SUBJECT_TEXT)
+    days = [d for d in (intent.weekdays or []) if 1 <= d <= 7]
+    if not days:
+        return ChatReply(text=compose.ASK_SLOT_DAY_TEXT)
+
+    templates = await repo.active_schedules(scope.child_id, today)
+    if not templates:
+        return ChatReply(text=compose.NO_SCHEDULE_TEXT)
+    slots = await repo.slots_for_schedules([t.pk for t in templates])
+
+    label = _fold(intent.week_label or "")
+    hint = _fold(intent.target_entry_hint or "")
+    found = [
+        (template, slot)
+        for template in templates
+        for slot in slots[template.pk]
+        if slot.weekday in days
+        # Un horario semanal no tiene semanas: nombrar la B no debe descartarlo.
+        and (not label or template.cycle_weeks == 1 or _fold(slot.week_label) == label)
+        and (not hint or hint in _fold(template.name) or hint in _fold(slot.subject))
+    ]
+    if not found:
+        return ChatReply(text=compose.NO_SLOT_FOUND_TEXT)
+
+    if len(found) == 1:
+        template, slot = found[0]
+        place = compose.slot_place(slot, schedule=template.name, cycle_weeks=template.cycle_weeks)
+        return ChatReply(
+            text=compose.format_slot_change_question(place, slot.subject, subject),
+            edit={
+                "edit_id": _new_edit_id(),
+                "chat_id": chat_id,
+                "action": "edit_slot",
+                "slot_id": slot.pk,
+                "text": subject,
+            },
+        )
+
+    shortlist = found[:MAX_CANDIDATES]
+    return ChatReply(
+        text=compose.format_slot_candidates(
+            [
+                compose.slot_place(slot, schedule=t.name, cycle_weeks=t.cycle_weeks)
+                + f", que ahora dice «{slot.subject}»"
+                for t, slot in shortlist
+            ]
+        ),
+        edit={
+            "edit_id": _new_edit_id(),
+            "chat_id": chat_id,
+            "action": "edit_slot",
+            "text": subject,
+        },
+        candidates=[
+            (
+                slot.pk,
+                compose.slot_button_label(slot, schedule=t.name, cycle_weeks=t.cycle_weeks),
+            )
+            for t, slot in shortlist
+        ],
+    )
+
+
 # --- Recordatorios --------------------------------------------------------------------
 
 
@@ -413,6 +531,10 @@ async def dispatch(scope: Scope, intent: Intent, *, today: date, chat_id: int) -
         return await prepare_add(intent, today, chat_id)
     if intent.action == "add_recurring":
         return await prepare_recurring(intent, chat_id)
+    if intent.action == "remove_recurring":
+        return await prepare_remove_recurring(scope, intent, today, chat_id)
+    if intent.action == "edit_slot":
+        return await prepare_edit_slot(scope, intent, today, chat_id)
     if intent.action == "remove_entry":
         return await prepare_remove(scope, intent, today, chat_id)
     if intent.action == "add_reminder":

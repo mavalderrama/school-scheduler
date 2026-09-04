@@ -266,6 +266,8 @@ INHERITS_SCOPE = {
     "apply_source_entries",
     "add_single_entry",
     "apply_schedule",
+    "deactivate_schedule",
+    "apply_slot_change",
     "entries_for_source",
     "slots_for_schedules",
     "schedule_slots",

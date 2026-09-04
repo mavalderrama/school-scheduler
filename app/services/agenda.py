@@ -178,6 +178,41 @@ async def add_recurring(
     )
 
 
+async def remove_recurring(
+    scope: Scope, schedule_id: int, *, today: date, user_id: int | None = None
+) -> str | None:
+    """Retira un horario vigente. Devuelve su nombre, o None si no era de este niño.
+
+    Como todo aquí, no borra: cierra el periodo y deja `superseded_by` a la source nueva,
+    así que el pasado sigue diciendo lo que decía.
+    """
+    user = await repo.get_user(user_id) if user_id is not None else None
+    source = await repo.create_source(
+        SourceKind.TEXT_CORRECTION, child_id=scope.child_id, submitted_by=user
+    )
+    name = await repo.deactivate_schedule(source.pk, schedule_id, valid_from=today)
+    log.info("schedule_removed", schedule_id=schedule_id, source_id=source.pk, name=name)
+    return name
+
+
+async def edit_slot(
+    scope: Scope, slot_id: int, subject: str, *, today: date, user_id: int | None = None
+) -> int | None:
+    """Cambia la materia de una franja. Devuelve el id del horario nuevo, o None.
+
+    «Nuevo» porque no se edita en sitio: se clona la plantilla con la franja cambiada y la
+    anterior queda cerrada el día antes. Es la misma forma de versionar que usa una foto
+    que reemplaza a otra, y por eso `/horario` de la semana pasada sigue cuadrando.
+    """
+    user = await repo.get_user(user_id) if user_id is not None else None
+    source = await repo.create_source(
+        SourceKind.TEXT_CORRECTION, child_id=scope.child_id, submitted_by=user
+    )
+    schedule_id = await repo.apply_slot_change(source.pk, slot_id, subject, valid_from=today)
+    log.info("slot_changed", slot_id=slot_id, source_id=source.pk, schedule_id=schedule_id)
+    return schedule_id
+
+
 async def remove_entry(scope: Scope, entry_id: int, user_id: int | None = None) -> bool:
     """Baja por texto: desactiva solo esa entrada, con `superseded_by` a la nueva source."""
     user = await repo.get_user(user_id) if user_id is not None else None

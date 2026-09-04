@@ -84,6 +84,8 @@ IntentAction = Literal[
     "query_subject",
     "add_entry",
     "add_recurring",
+    "remove_recurring",
+    "edit_slot",
     "remove_entry",
     "add_reminder",
     "list_reminders",
@@ -130,6 +132,10 @@ class Intent(BaseModel):
     )
     only_school_days: bool | None = Field(
         default=None, description="True solo si piden que sea únicamente los días de colegio"
+    )
+    week_label: str | None = Field(
+        default=None,
+        description="Para edit_slot: la semana del ciclo tal cual la nombran ('A', 'B')",
     )
 
 

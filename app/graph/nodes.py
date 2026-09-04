@@ -26,6 +26,7 @@ from app.llm.schemas import ExtractionResult, QAPair
 from app.llm.tenant import NoCredentialsError
 from app.log import get_logger
 from app.services import agenda, chat, ingest, reminders
+from app.services import schedule as schedule_service
 from app.services import scope as scope_service
 
 log = get_logger(__name__)
@@ -285,6 +286,10 @@ async def apply_edit(state: GraphState, runtime: Runtime[GraphContext]) -> dict[
         return await _apply_remove(sc, edit, chosen, user_id)
     if action == "add_recurring":
         return await _apply_add_recurring(sc, edit, user_id)
+    if action == "remove_recurring":
+        return await _apply_remove_recurring(sc, edit, chosen, user_id)
+    if action == "edit_slot":
+        return await _apply_edit_slot(sc, edit, chosen, user_id)
     if action == "add_reminder":
         return await _apply_add_reminder(sc, edit, state, user_id)
     if action == "remove_reminder":
@@ -343,6 +348,54 @@ async def _apply_add_recurring(
             "text": text,
         },
     }
+
+
+async def _apply_remove_recurring(
+    sc: scope_service.Scope, edit: dict[str, Any], chosen: Any, user_id: int | None
+) -> dict[str, Any]:
+    """Retira un horario vigente. El id llega de un botón, así que lo comprueba el repo."""
+    target = chosen or edit.get("schedule_id")
+    if target is None:
+        return {"reply": "No sé cuál quitar. Vuelve a pedírmelo, por favor."}
+    today = datetime.now(sc.zoneinfo).date()
+    name = await agenda.remove_recurring(sc, int(target), today=today, user_id=user_id)
+    if name is None:
+        return {"reply": "Ese horario ya no está vigente."}
+    return {"reply": compose.format_schedule_removed(name)}
+
+
+async def _apply_edit_slot(
+    sc: scope_service.Scope, edit: dict[str, Any], chosen: Any, user_id: int | None
+) -> dict[str, Any]:
+    """Cambia la materia de una franja, versionando la plantilla entera.
+
+    La franja se relee de los horarios **vigentes de este niño** antes de tocar nada: eso
+    valida de quién es el id del botón y, de paso, da el «antes» que se enseña después.
+    """
+    target = chosen or edit.get("slot_id")
+    subject = str(edit.get("text") or "").strip()
+    if target is None or not subject:
+        return {"reply": "No sé qué franja cambiar. Vuelve a pedírmelo, por favor."}
+
+    today = datetime.now(sc.zoneinfo).date()
+    templates = await repo.active_schedules(sc.child_id, today)
+    slots = await repo.slots_for_schedules([t.pk for t in templates])
+    pair = next(
+        ((t, s) for t in templates for s in slots[t.pk] if s.pk == int(target)),
+        None,
+    )
+    if pair is None:
+        return {"reply": "Esa franja ya no está vigente."}
+    template, slot = pair
+    place = compose.slot_place(slot, schedule=template.name, cycle_weeks=template.cycle_weeks)
+    if schedule_service.same_subject(slot.subject, subject):
+        # Versionar para dejarlo igual solo ensucia el histórico.
+        return {"reply": f"Ya dice eso: {place} tiene «{slot.subject}»."}
+
+    before = slot.subject
+    if await agenda.edit_slot(sc, slot.pk, subject, today=today, user_id=user_id) is None:
+        return {"reply": "Esa franja ya no está vigente."}
+    return {"reply": compose.format_slot_changed(place, before, subject)}
 
 
 async def offer_reminder(state: GraphState, runtime: Runtime[GraphContext]) -> dict[str, Any]:

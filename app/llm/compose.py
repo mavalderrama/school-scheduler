@@ -268,6 +268,8 @@ HELP_TEXT = (
     "• «agrega que el martes lleva disfraz»\n"
     "• «quita lo del jueves»\n"
     "• «todos los viernes tiene natación» (se repite cada semana)\n"
+    "• «quita la natación de los viernes»\n"
+    "• «el martes de la Semana B cámbialo por evento»\n"
     "• «recuérdame todos los días a las 7 que revise la agenda»\n"
     "\n"
     "• «¿cuándo hay natación?»\n"
@@ -434,6 +436,84 @@ def format_recurring_added(weekdays: str, text: str, *, replaced: bool = False) 
 NO_RECURRING_REMINDER_TEXT = (
     "👍 Listo, sin aviso. Si luego lo quieres, dime «recuérdame los viernes a las 6 la natación»."
 )
+
+
+class StoredSlotLike(Protocol):
+    """Lo que compose necesita de una franja guardada (`ScheduleSlot`)."""
+
+    @property
+    def week_label(self) -> str: ...
+    @property
+    def weekday(self) -> int: ...
+    @property
+    def subject(self) -> str: ...
+
+
+def slot_place(slot: StoredSlotLike, *, schedule: str, cycle_weeks: int) -> str:
+    """Dónde está la franja: «el martes de la Semana B en «Horario K4A»».
+
+    La etiqueta de la semana solo aparece si el horario tiene ciclo: uno semanal no tiene
+    «Semana A», y nombrarla importa el vocabulario de otro horario distinto.
+    """
+    day = WEEKDAYS_ES[slot.weekday - 1]
+    week = f" de la Semana {html.escape(slot.week_label)}" if cycle_weeks > 1 else ""
+    return f"el {day}{week} en «{html.escape(schedule)}»"
+
+
+def slot_button_label(slot: StoredSlotLike, *, schedule: str, cycle_weeks: int) -> str:
+    """Etiqueta corta y en texto plano: Telegram no admite HTML en los botones."""
+    day = WEEKDAYS_ES[slot.weekday - 1]
+    week = f" sem. {slot.week_label}" if cycle_weeks > 1 else ""
+    label = f"{schedule}: {day}{week} · {slot.subject}"
+    return label[:57] + "…" if len(label) > 60 else label
+
+
+def format_slot_change_question(place: str, before: str, after: str) -> str:
+    return (
+        f"🔁 ¿Cambio {place}, que ahora dice «{html.escape(before)}», por "
+        f"<b>{html.escape(after)}</b>?"
+    )
+
+
+def format_slot_changed(place: str, before: str, after: str) -> str:
+    return (
+        f"✅ Cambiado {place}: «{html.escape(before)}» → <b>{html.escape(after)}</b>. "
+        f"Lo anterior queda guardado."
+    )
+
+
+def format_slot_candidates(places: Sequence[str]) -> str:
+    lines = ["Encontré varias franjas. ¿Cuál cambio?"]
+    lines.extend(f"• {p}" for p in places)
+    return "\n".join(lines)
+
+
+def format_remove_schedule_question(name: str) -> str:
+    return (
+        f"🗑️ ¿Quito el horario <b>{html.escape(name)}</b>? Dejará de salir a partir de hoy; "
+        f"lo anterior queda guardado."
+    )
+
+
+def format_schedule_removed(name: str) -> str:
+    return f"✅ Quitado el horario <b>{html.escape(name)}</b>. Ya no lo cuento a partir de hoy."
+
+
+def format_schedule_candidates(names: Sequence[str]) -> str:
+    lines = ["Tengo varios horarios. ¿Cuál quito?"]
+    lines.extend(f"• {html.escape(n)}" for n in names)
+    return "\n".join(lines)
+
+
+NO_SLOT_FOUND_TEXT = (
+    "No encontré esa franja en ningún horario vigente. Mira /horario para ver cómo está "
+    "cargado y dime el día tal cual aparece."
+)
+
+ASK_SLOT_DAY_TEXT = "¿Qué día cambio? Por ejemplo: «el martes de la Semana B cámbialo por evento»."
+
+ASK_SLOT_SUBJECT_TEXT = "¿Por qué lo cambio? Dime la materia o actividad nueva."
+
 
 RECURRING_REMINDER_UNCLEAR_TEXT = (
     "No entendí la hora, así que lo dejo sin aviso (lo recurrente ya está guardado). Si lo "
