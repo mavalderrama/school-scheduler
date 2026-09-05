@@ -752,3 +752,56 @@ async def test_without_a_matching_entry_it_still_says_it_did_not_understand() ->
     )
     assert reply.edit is None
     assert "No te entendí" in reply.text
+
+
+# --- Fase 10.4: un rango también mira el horario ----------------------------------------------
+
+
+async def test_a_week_query_includes_the_schedule() -> None:
+    """El bug: recién guardado «natación los viernes», «¿qué hay la próxima semana?» decía
+    que no había nada. `/semana` sí lo enseñaba: el mismo dato dependía de por dónde se
+    preguntara."""
+    today = date.today()
+    monday = today + timedelta(days=7 - today.weekday())
+    await agenda.add_recurring(await a_scope(), "5", "natación", today=today)
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="query_range", date_from=monday, date_to=monday + timedelta(days=6)),
+        today=today,
+        chat_id=1,
+    )
+
+    friday = monday + timedelta(days=4)
+    assert "natación" in reply.text
+    assert f"viernes {friday.day}" in reply.text
+    assert "No tengo nada entre" not in reply.text
+    # El fin de semana no se reporta: que no haya clase el sábado no es noticia.
+    assert "sábado" not in reply.text and "domingo" not in reply.text
+
+
+async def test_a_range_still_lists_the_entries_next_to_the_schedule() -> None:
+    today = date.today()
+    monday = today + timedelta(days=7 - today.weekday())
+    await agenda.add_recurring(await a_scope(), "5", "natación", today=today)
+    await seed((monday, "bring", "sudadera"))
+
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="query_range", date_from=monday, date_to=monday + timedelta(days=6)),
+        today=today,
+        chat_id=1,
+    )
+    assert "natación" in reply.text and "sudadera" in reply.text
+
+
+async def test_a_range_without_any_schedule_answers_as_before() -> None:
+    today = date.today()
+    monday = today + timedelta(days=7 - today.weekday())
+    reply = await chat.dispatch(
+        await a_scope(),
+        Intent(action="query_range", date_from=monday, date_to=monday + timedelta(days=6)),
+        today=today,
+        chat_id=1,
+    )
+    assert "No tengo nada entre" in reply.text

@@ -227,6 +227,47 @@ async def resolve_day(scope: Scope, day: date) -> list[SlotResult]:
     return [r for r in results if r.subject is not None]
 
 
+MAX_RANGE_DAYS = 14
+
+
+async def resolve_range(
+    scope: Scope, date_from: date, date_to: date, *, max_days: int = MAX_RANGE_DAYS
+) -> list[list[SlotResult]]:
+    """Qué toca cada día de un rango, cargando los horarios **una sola vez**.
+
+    Existe porque una consulta por rango («¿qué hay la próxima semana?») contestaba solo con
+    las entradas de agenda y se dejaba el horario fuera: acababa de guardarse «natación los
+    viernes» y la semana siguiente salía vacía. `/semana` sí lo mezclaba, así que el mismo
+    dato dependía de por dónde se preguntara.
+
+    Un fin de semana no se reporta (no es noticia); un día lectivo caído —festivo, jornada
+    pedagógica— sí, una vez, porque eso es justo lo que no se sabe de memoria.
+    """
+    loaded = await load_all(scope)
+    if not loaded:
+        return []
+    out: list[list[SlotResult]] = []
+    day = date_from
+    while day <= date_to and len(out) < max_days:
+        info = schoolcal.day_info(day, exceptions=loaded[0].exceptions, country=scope.country)
+        if not info.is_school_day:
+            if day.isoweekday() <= 5:
+                out.append([SlotResult(day, skipped_reason=info.reason)])
+            day += timedelta(days=1)
+            continue
+        found = []
+        for item in loaded:
+            result = slot_for(
+                day, item.template, item.slots, exceptions=item.exceptions, country=scope.country
+            )
+            if result.subject is not None:
+                found.append(result)
+        if found:
+            out.append(found)
+        day += timedelta(days=1)
+    return out
+
+
 async def resolve(scope: Scope, day: date) -> SlotResult | None:
     """La primera franja del día. Se conserva para quien solo necesita una."""
     results = await resolve_day(scope, day)

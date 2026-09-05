@@ -225,16 +225,26 @@ async def query_range(scope: Scope, intent: Intent, today: date) -> ChatReply:
         if len(lines) == 1:
             return ChatReply(text=f"No tengo nada para el {compose.format_date_es(date_from)}.")
         return ChatReply(text="\n".join(lines))
-    return ChatReply(
-        text=compose.format_agenda(
-            entries,
-            title="📚 Esto es lo que tengo:",
-            empty=(
-                f"No tengo nada entre el {compose.format_date_es(date_from)} y el "
-                f"{compose.format_date_es(date_to)}."
-            ),
+    # Un rango también lleva el horario, como `/semana`: sin esto, la semana siguiente salía
+    # vacía justo después de guardar «natación los viernes», según por dónde se preguntara.
+    plan: list[str] = []
+    for day_slots in await schedule_service.resolve_range(scope, date_from, date_to):
+        plan.extend(compose.slot_lines(day_slots, with_date=True))
+    if not plan:
+        return ChatReply(
+            text=compose.format_agenda(
+                entries,
+                title="📚 Esto es lo que tengo:",
+                empty=(
+                    f"No tengo nada entre el {compose.format_date_es(date_from)} y el "
+                    f"{compose.format_date_es(date_to)}."
+                ),
+            )
         )
+    rest = compose.format_agenda(
+        entries, title="📚 Además:", empty="No tengo nada más apuntado esos días."
     )
+    return ChatReply(text="🗓️ <b>Del horario:</b>\n" + "\n".join(plan) + "\n\n" + rest)
 
 
 async def prepare_add(intent: Intent, today: date, chat_id: int) -> ChatReply:
