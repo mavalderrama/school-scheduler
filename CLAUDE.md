@@ -152,6 +152,36 @@ Tres cosas que no son opcionales, verificadas contra el paquete: el pool necesit
 
 Esquema SQL en la sección 5 del plan; modelos en `app/db/models.py` y migración en `app/db/migrations/0001_initial.py`; contratos pydantic en la sección 6 y en `app/llm/schemas.py`.
 
+### Cómo desplegar (obligatorio: por Proxmox, no por SSH al LXC)
+
+**Al LXC no se entra por SSH.** `ssh root@10.70.70.60` responde pero rechaza la clave
+(`Permission denied (publickey,password)`); perder el tiempo probando usuarios y claves ahí es
+un callejón conocido. La vía buena es el **nodo Proxmox** —`hades`, `10.70.70.51`, con SSH por
+clave ya autorizada— y desde él `pct exec 109`:
+
+```bash
+ssh root@10.70.70.51 "pct exec 109 -- bash -lc 'cd /opt/agenda-escolar-bot && <comando>'"
+```
+
+Despliegue completo, en este orden:
+
+1. **`git push`** de los commits a `origin/main`. Sin esto el `git pull` del LXC no trae nada, y
+   es justo lo que pasó el 2026-09-04: se dio por desplegado algo que seguía en la máquina local
+   y se depuró contra el bot viejo. **Comprobar siempre el commit que está corriendo** antes de
+   sacar conclusiones de una captura de Telegram:
+   `... 'cd /opt/agenda-escolar-bot && git log --oneline -1'`.
+2. `git pull --ff-only`.
+3. `docker compose up -d --build bot`. El `--build` no es opcional: el código va **dentro** de la
+   imagen, no montado; sin él el contenedor arranca con el de antes. Postgres no se toca.
+4. Comprobar el arranque: `docker compose ps` y `docker compose logs --tail=30 bot`. Tiene que
+   verse `db_connected`, `checkpointer_ready`, `llm_providers`, `scheduler_jobs_registered` y
+   `Start polling`, y el `migrate` del arranque decir qué aplicó (`No migrations to apply` cuando
+   la fase no lleva migración). **Nunca `logs -f`**: se queda colgado.
+
+Rollback: `git checkout <commit anterior>` y repetir el paso 3. Las migraciones de Django no se
+revierten solas, así que si la fase llevaba una hay que decidir a mano; las fases sin migración
+son rollback limpio.
+
 ## Variables de entorno
 
 Lista canónica con comentarios en `.env.example`. Validación en `app/config.py`: falla en arranque con mensaje claro si un proveedor seleccionado no tiene sus variables, si un fallback es igual a su principal, si hora/zona horaria son inválidas, si `DATABASE_URL` lleva dialecto de SQLAlchemy, si el admin está habilitado sin `DJANGO_SECRET_KEY`, o si el superusuario tiene usuario sin contraseña.
@@ -176,4 +206,4 @@ Lista canónica con comentarios en `.env.example`. Validación en `app/config.py
 
 ## Despliegue
 
-LXC **Debian 13** en Proxmox (`nesting=1,keyctl=1`, unprivileged) con Docker Compose. Desplegado el 2026-09-02 en el nodo `hades` como **VMID 109 `agenda-bot`**, IP fija **10.70.70.60/24** (gw .1, `vmbr0`, firewall en la NIC), 2 vCPU / 2 GiB / 20 GiB en `local-lvm`, `onboot=1`. El código vive en `/opt/agenda-escolar-bot` clonado de GitHub; se actualiza con `git pull`. El único puerto publicado es el del admin (`ADMIN_BIND:ADMIN_PORT`, default `0.0.0.0:8000`), **solo en la LAN**; nunca hacer port-forward hacia internet. `Dockerfile` sobre `python:3.12-slim` con `uv sync --frozen`; usuario `bot` (uid 1000) sin privilegios, `/data` es suyo (el bind mount `./data` debe ser escribible por uid 1000). Targets: `base` (solo Ollama/API) y `with-claude` (añade el extra `claude` y verifica en build que el binario empaquetado arranca). Postgres 18: el volumen `pgdata` se monta en `/var/lib/postgresql` (cambió respecto a las imágenes ≤17); `CREATE EXTENSION vector` en 0001 necesita superusuario de Postgres (el de compose lo es). El token de suscripción se genera en la laptop con `claude setup-token`, no en el LXC, y caduca al año. Detalles en la sección 9 del plan.
+LXC **Debian 13** en Proxmox (`nesting=1,keyctl=1`, unprivileged) con Docker Compose. Desplegado el 2026-09-02 en el nodo `hades` como **VMID 109 `agenda-bot`**, IP fija **10.70.70.60/24** (gw .1, `vmbr0`, firewall en la NIC), 2 vCPU / 2 GiB / 20 GiB en `local-lvm`, `onboot=1`. El código vive en `/opt/agenda-escolar-bot` clonado de GitHub; se actualiza como dice **Cómo desplegar**, aquí abajo. El único puerto publicado es el del admin (`ADMIN_BIND:ADMIN_PORT`, default `0.0.0.0:8000`), **solo en la LAN**; nunca hacer port-forward hacia internet. `Dockerfile` sobre `python:3.12-slim` con `uv sync --frozen`; usuario `bot` (uid 1000) sin privilegios, `/data` es suyo (el bind mount `./data` debe ser escribible por uid 1000). Targets: `base` (solo Ollama/API) y `with-claude` (añade el extra `claude` y verifica en build que el binario empaquetado arranca). Postgres 18: el volumen `pgdata` se monta en `/var/lib/postgresql` (cambió respecto a las imágenes ≤17); `CREATE EXTENSION vector` en 0001 necesita superusuario de Postgres (el de compose lo es). El token de suscripción se genera en la laptop con `claude setup-token`, no en el LXC, y caduca al año. Detalles en la sección 9 del plan.
